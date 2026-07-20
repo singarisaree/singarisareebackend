@@ -19,17 +19,7 @@ if [[ ! -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]]; then
     --agree-tos --non-interactive
 fi
 
-echo "==> Ensure certbot SSL helper files exist..."
-mkdir -p /etc/letsencrypt
-if [[ ! -f /etc/letsencrypt/options-ssl-nginx.conf ]]; then
-  curl -fsSL https://raw.githubusercontent.com/certbot/certbot/master/certbot-nginx/certbot_nginx/_internal/tls_configs/options-ssl-nginx.conf \
-    -o /etc/letsencrypt/options-ssl-nginx.conf
-fi
-if [[ ! -f /etc/letsencrypt/ssl-dhparams.pem ]]; then
-  openssl dhparam -out /etc/letsencrypt/ssl-dhparams.pem 2048
-fi
-
-echo "==> Write nginx SSL config (no http2 — compatible with nginx 1.24)..."
+echo "==> Write nginx SSL config (inline TLS — no certbot helper files needed)..."
 cat > /etc/nginx/sites-available/singari-api <<NGINX
 upstream singari_api {
     server 127.0.0.1:5001;
@@ -57,8 +47,10 @@ server {
 
     ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
-    include /etc/letsencrypt/options-ssl-nginx.conf;
-    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
 
     client_max_body_size 15m;
 
