@@ -139,7 +139,7 @@ ENV
 chmod 600 "${APP_DIR}/.env"
 
 echo "==> npm install..."
-HUSKY=0 npm ci
+HUSKY=0 npm ci --include=dev
 
 echo "==> Database migrate..."
 npm run prisma:generate
