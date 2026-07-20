@@ -1,0 +1,42 @@
+export const EMAIL_MARKETING_TEMPLATES = [
+  {
+    key: 'new-collection',
+    name: 'New Collection',
+    description: 'Introduce a newly launched saree collection.',
+    subject: 'A new Singari Sarees collection is here',
+    heading: 'Discover our newest weaves',
+    body: 'Hi {{name}},\n\nOur newest saree collection has arrived. Explore handcrafted designs chosen to bring timeless elegance to every celebration.',
+  },
+  {
+    key: 'special-offer',
+    name: 'Special Offer',
+    description: 'Share a limited-time promotion.',
+    subject: 'A special offer from Singari Sarees',
+    heading: 'Something special, just for you',
+    body: 'Hi {{name}},\n\nEnjoy our latest offer on selected Singari Sarees styles. Shop soon while your favourite designs are available.',
+  },
+  {
+    key: 'festival',
+    name: 'Festival Edit',
+    description: 'Promote festive and occasion collections.',
+    subject: 'Celebrate in timeless Singari Sarees style',
+    heading: 'Your festive saree awaits',
+    body: 'Hi {{name}},\n\nCelebrate the season with rich colours, graceful drapes, and handcrafted weaves curated for your special moments.',
+  },
+  {
+    key: 'restock',
+    name: 'Back in Stock',
+    description: 'Announce popular products returning.',
+    subject: 'Your favourites are back in stock',
+    heading: 'Loved styles have returned',
+    body: 'Hi {{name}},\n\nSome of our most-loved sarees are back in stock. Take another look before they are gone again.',
+  },
+  {
+    key: 'custom',
+    name: 'Custom Email',
+    description: 'Write a campaign from scratch.',
+    subject: '',
+    heading: '',
+    body: 'Hi {{name}},\n\n',
+  },
+] as const;
