@@ -16,7 +16,7 @@
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
     "format": "prettier --write \"src/**/*.ts\" \"prisma/**/*.ts\"",
-    "prepare": "node -e \"if(process.env.HUSKY==='0')process.exit(0)\" && npx husky || true"
+    "prepare": "sh -c 'test \"$HUSKY\" = \"0\" && exit 0; npx husky || true'"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -41,7 +41,11 @@
     "sharp": "^0.35.3",
     "socket.io": "^4.8.3",
     "winston": "^3.17.0",
-    "zod": "^3.24.2"
+    "zod": "^3.24.2",
+    "prisma": "^6.19.3",
+    "typescript": "^5.8.2",
+    "tsc-alias": "^1.8.13",
+    "tsx": "^4.19.3"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
@@ -60,11 +64,7 @@
     "eslint-config-prettier": "^10.1.1",
     "husky": "^9.1.7",
     "lint-staged": "^15.5.0",
-    "prettier": "^3.5.3",
-    "prisma": "^6.19.3",
-    "tsc-alias": "^1.8.13",
-    "tsx": "^4.19.3",
-    "typescript": "^5.8.2"
+    "prettier": "^3.5.3"
   },
   "lint-staged": {
     "src/**/*.ts": [

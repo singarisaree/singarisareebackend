@@ -24,8 +24,8 @@ if [[ ! -d "$UPLOADS_DIR" ]]; then
 fi
 echo "==> uploads/ protected at ${UPLOADS_DIR}"
 
-echo "==> Installing dependencies (include dev tools for prisma/tsc)..."
-HUSKY=0 npm ci --include=dev
+echo "==> Installing dependencies..."
+env -u NODE_ENV HUSKY=0 npm ci --include=dev
 
 echo "==> Generating Prisma client..."
 npm run prisma:generate
