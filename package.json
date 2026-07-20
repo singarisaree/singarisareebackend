@@ -16,7 +16,7 @@
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
     "format": "prettier --write \"src/**/*.ts\" \"prisma/**/*.ts\"",
-    "prepare": "node -e \"if(process.env.HUSKY==='0')process.exit(0)\" && npx husky || true",
+    "prepare": "node -e \"if(process.env.HUSKY==='0')process.exit(0)\" && npx husky || true"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
