@@ -113,7 +113,7 @@ function orderTemplate(
     category: 'UTILITY',
     headerText,
     body,
-    footer: 'Singari Sarees',
+    footer: 'https://www.singarisaree.com',
     examples,
     variableLabels,
     status: 'DRAFT',
