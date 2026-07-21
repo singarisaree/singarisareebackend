@@ -10,6 +10,8 @@
     "prisma:generate": "node node_modules/prisma/build/index.js generate",
     "prisma:migrate": "node node_modules/prisma/build/index.js migrate dev",
     "prisma:migrate:deploy": "node node_modules/prisma/build/index.js migrate deploy",
+    "prisma:migrate:resolve": "node node_modules/prisma/build/index.js migrate resolve",
+    "prisma:migrate:status": "node node_modules/prisma/build/index.js migrate status",
     "prisma:seed": "node node_modules/tsx/dist/cli.mjs prisma/seed.ts",
     "prisma:seed:minimal": "node node_modules/tsx/dist/cli.mjs prisma/seed-minimal.ts",
     "prisma:studio": "node node_modules/prisma/build/index.js studio",
