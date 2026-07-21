@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/config/database';
 import { localStorageService } from '@/integrations/local-storage.service';
 import { ApiError } from '@/shared/api-response';
+import { invalidateCache } from '@/utils/memory-cache';
 import {
   type WhatsAppTemplateDraftInput,
   type WhatsAppTemplateKind,
@@ -88,6 +89,7 @@ let whatsappTemplatesCache: { data: WhatsAppTemplateRecord[]; expiresAt: number 
 
 function invalidatePublicSettingsCache(): void {
   publicSettingsCache = null;
+  invalidateCache('storefront:homepage');
 }
 
 function invalidateWhatsAppTemplatesCache(): void {
