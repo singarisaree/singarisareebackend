@@ -10,8 +10,12 @@ const router = Router();
  * Shiprocket tracking webhook.
  * Configure in Shiprocket → Settings → API → Webhooks:
  *   POST {API_URL}/api/v1/fulfillment/tracking
- * Optional header: x-api-key = SHIPROCKET_WEBHOOK_TOKEN
- * URL must not contain the word "shiprocket".
+ * Optional security token → sent as header x-api-key = SHIPROCKET_WEBHOOK_TOKEN
+ * URL must not contain keywords: shiprocket, kartrocket, sr, kr
+ *
+ * Shiprocket validates the URL with a POST and REQUIRES HTTP 200.
+ * Do not return 401/503 during their save/test or they show:
+ * "Please check your endpoint, unable to send request to mentioned api."
  */
 router.post(
   '/tracking',
@@ -20,13 +24,15 @@ router.post(
     if (configuredToken) {
       const provided = String(req.headers['x-api-key'] || '').trim();
       if (provided !== configuredToken) {
-        res.status(401).json({ success: false, message: 'Invalid webhook token' });
+        // Still 200 — Shiprocket fails the URL check on any non-200
+        logger.warn('Fulfillment webhook: invalid or missing x-api-key');
+        res.status(200).json({ success: false, message: 'Invalid webhook token' });
         return;
       }
     } else if (env.NODE_ENV === 'production') {
-      logger.error('SHIPROCKET_WEBHOOK_TOKEN is required in production');
-      res.status(503).json({ success: false, message: 'Webhook not configured' });
-      return;
+      logger.warn(
+        'SHIPROCKET_WEBHOOK_TOKEN is not set — webhook accepts all requests (set token in .env)',
+      );
     }
 
     const payload = (req.body || {}) as Record<string, unknown>;
@@ -43,7 +49,7 @@ router.post(
       logger.error('Fulfillment tracking webhook handler failed', { error });
     }
 
-    // Shiprocket requires HTTP 200
+    // Shiprocket requires HTTP 200 for URL validation and delivery
     res.status(200).json({ success: true });
   }),
 );
