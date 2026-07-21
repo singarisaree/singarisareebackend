@@ -53,18 +53,10 @@ active/inactive do not send customer messages.
 
 ### Text marketing
 
-Category: **Marketing**. Body:
+Category: **Marketing**. Body (Meta-safe: no variable at start/end, enough fixed text):
 
 ```text
-Hi {{1}},
-
-{{2}}
-
-{{3}}
-
-Shop now: {{4}}
-
-— Singari Sarees
+Hello {{1}}, thank you for being part of Singari Sarees. Here is our latest update: {{2}}. More details for you: {{3}}. Shop this collection here: {{4}}. We look forward to seeing you again soon.
 ```
 
 Body variable order:
@@ -81,6 +73,13 @@ body-variable order as the text marketing template. The Admin Panel uploads the
 sample through Meta's Resumable Upload API and stores the returned header handle.
 Existing three-variable marketing templates must be replaced or resubmitted with
 the fourth URL variable before they can be activated and used by Admin Users.
+
+### Meta body rules (all templates)
+
+- Do **not** start or end the body with a variable
+- Do **not** put a variable alone on its own line
+- Keep enough fixed text around variables (short messages with many `{{n}}` get rejected)
+- Variables stay only in the body (not header/footer)
 
 ### First-login welcome
 

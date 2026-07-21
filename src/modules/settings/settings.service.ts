@@ -113,7 +113,7 @@ function orderTemplate(
     category: 'UTILITY',
     headerText,
     body,
-    footer: 'https://www.singarisaree.com',
+    footer: 'Singari Sarees',
     examples,
     variableLabels,
     status: 'DRAFT',
@@ -121,12 +121,19 @@ function orderTemplate(
   };
 }
 
+/**
+ * Meta WhatsApp template body rules:
+ * - Body must not start or end with a variable
+ * - Enough static text for the number of variables
+ * - No line that is only a variable
+ * Variable order is fixed for send-code compatibility.
+ */
 const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateRecord> = {
   order_placed: orderTemplate(
     'order_placed',
     'singari_order_placed',
     'Order placed',
-    'Hello {{1}}, we received your Singari Sarees order {{2}}.\nOrder total: {{3}}',
+    'Hello {{1}}, thank you for shopping with Singari Sarees. We received your order {{2}}. Your order total is {{3}}. We will update you as it moves ahead.',
     ['Lakshmi', 'SS12345', '₹2,499'],
     ['Customer name', 'Short order number', 'Formatted order total'],
   ),
@@ -134,7 +141,7 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     'order_payment_pending',
     'singari_order_payment_pending',
     'Payment pending',
-    'Hello {{1}}, payment is pending for your Singari Sarees order {{2}}.\nOrder total: {{3}}',
+    'Hello {{1}}, payment is still pending for your Singari Sarees order {{2}}. The order total is {{3}}. Please complete payment to confirm your order.',
     ['Lakshmi', 'SS12345', '₹2,499'],
     ['Customer name', 'Short order number', 'Formatted order total'],
   ),
@@ -142,7 +149,7 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     'order_confirmed',
     'singari_order_confirmed',
     'Order confirmed',
-    'Hello {{1}}, your Singari Sarees order {{2}} is confirmed.\nOrder total: {{3}}',
+    'Hello {{1}}, your Singari Sarees order {{2}} is confirmed. The order total is {{3}}. We are preparing your saree with care.',
     ['Lakshmi', 'SS12345', '₹2,499'],
     ['Customer name', 'Short order number', 'Formatted order total'],
   ),
@@ -150,7 +157,7 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     'order_ready_to_ship',
     'singari_order_ready_to_ship',
     'Ready to ship',
-    'Hello {{1}}, your Singari Sarees order {{2}} is packed and ready to ship.',
+    'Hello {{1}}, your Singari Sarees order {{2}} is packed and ready to ship. We will share tracking details once it is dispatched.',
     ['Lakshmi', 'SS12345'],
     ['Customer name', 'Short order number'],
   ),
@@ -158,23 +165,23 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     'order_shipped',
     'singari_order_shipped',
     'Order shipped',
-    'Hello {{1}}, your Singari Sarees order {{2}} has shipped.\nTrack it here: {{3}}',
-    ['Lakshmi', 'SS12345', 'https://example.com/track'],
+    'Hello {{1}}, your Singari Sarees order {{2}} has been shipped. Track your delivery here: {{3}}. Thank you for shopping with us.',
+    ['Lakshmi', 'SS12345', 'https://www.singarisaree.com'],
     ['Customer name', 'Short order number', 'Tracking URL'],
   ),
   order_in_transit: orderTemplate(
     'order_in_transit',
     'singari_order_in_transit',
     'Order in transit',
-    'Hello {{1}}, your Singari Sarees order {{2}} is in transit.\nTrack it here: {{3}}',
-    ['Lakshmi', 'SS12345', 'https://example.com/track'],
+    'Hello {{1}}, your Singari Sarees order {{2}} is on the way. Track your delivery here: {{3}}. We hope you enjoy your saree.',
+    ['Lakshmi', 'SS12345', 'https://www.singarisaree.com'],
     ['Customer name', 'Short order number', 'Tracking URL'],
   ),
   order_delivered: orderTemplate(
     'order_delivered',
     'singari_order_delivered',
     'Order delivered',
-    'Hello {{1}}, your Singari Sarees order {{2}} has been delivered. Thank you for shopping with us.',
+    'Hello {{1}}, your Singari Sarees order {{2}} has been delivered. Thank you for shopping with us. Visit www.singarisaree.com anytime.',
     ['Lakshmi', 'SS12345'],
     ['Customer name', 'Short order number'],
   ),
@@ -182,7 +189,7 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     'order_returned',
     'singari_order_returned',
     'Order returned',
-    'Hello {{1}}, your Singari Sarees order {{2}} has been marked as returned.',
+    'Hello {{1}}, your Singari Sarees order {{2}} has been marked as returned. Our team will guide you on the next steps.',
     ['Lakshmi', 'SS12345'],
     ['Customer name', 'Short order number'],
   ),
@@ -190,7 +197,7 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     'order_cancelled',
     'singari_order_cancelled',
     'Order cancelled',
-    'Hello {{1}}, your Singari Sarees order {{2}} has been cancelled.',
+    'Hello {{1}}, your Singari Sarees order {{2}} has been cancelled. If you need help, please contact our support team.',
     ['Lakshmi', 'SS12345'],
     ['Customer name', 'Short order number'],
   ),
@@ -198,7 +205,7 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     'order_failed',
     'singari_order_failed',
     'Order failed',
-    'Hello {{1}}, your Singari Sarees order {{2}} could not be completed. Please contact support if you need help.',
+    'Hello {{1}}, your Singari Sarees order {{2}} could not be completed. Please contact support if any amount was charged.',
     ['Lakshmi', 'SS12345'],
     ['Customer name', 'Short order number'],
   ),
@@ -206,7 +213,7 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     'order_rto',
     'singari_order_rto',
     'Returned to origin',
-    'Hello {{1}}, your Singari Sarees order {{2}} is being returned to origin.',
+    'Hello {{1}}, your Singari Sarees order {{2}} is being returned to origin. Our team will update you soon.',
     ['Lakshmi', 'SS12345'],
     ['Customer name', 'Short order number'],
   ),
@@ -214,7 +221,7 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     'order_refunded',
     'singari_order_refunded',
     'Order refunded',
-    'Hello {{1}}, the refund for your Singari Sarees order {{2}} has been processed.',
+    'Hello {{1}}, the refund for your Singari Sarees order {{2}} has been processed. It may take a few working days to reflect.',
     ['Lakshmi', 'SS12345'],
     ['Customer name', 'Short order number'],
   ),
@@ -222,7 +229,7 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     'return_requested',
     'singari_return_requested',
     'Return requested',
-    'Hello {{1}}, your return request for Singari Sarees order {{2}} was received.\nReason: {{3}}',
+    'Hello {{1}}, we received your return request for Singari Sarees order {{2}}. Reason noted: {{3}}. Our team will review it shortly.',
     ['Lakshmi', 'SS12345', 'Product did not fit'],
     ['Customer name', 'Short order number', 'Return reason'],
   ),
@@ -230,7 +237,7 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     'return_accepted',
     'singari_return_accepted',
     'Return accepted',
-    'Hello {{1}}, your return request for Singari Sarees order {{2}} has been accepted.',
+    'Hello {{1}}, your return request for Singari Sarees order {{2}} has been accepted. We will arrange the next pickup steps soon.',
     ['Lakshmi', 'SS12345'],
     ['Customer name', 'Short order number'],
   ),
@@ -238,7 +245,7 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     'return_rejected',
     'singari_return_rejected',
     'Return request update',
-    'Hello {{1}}, your return request for Singari Sarees order {{2}} was not approved.\nNote: {{3}}',
+    'Hello {{1}}, your return request for Singari Sarees order {{2}} was not approved. Note from our team: {{3}}. Please contact support if you need help.',
     ['Lakshmi', 'SS12345', 'Please contact support for details'],
     ['Customer name', 'Short order number', 'Admin note'],
   ),
@@ -246,7 +253,7 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     'return_out_for_pickup',
     'singari_return_out_for_pickup',
     'Return pickup arranged',
-    'Hello {{1}}, pickup is arranged for your return from Singari Sarees order {{2}}.',
+    'Hello {{1}}, pickup is arranged for your return from Singari Sarees order {{2}}. Please keep the package ready.',
     ['Lakshmi', 'SS12345'],
     ['Customer name', 'Short order number'],
   ),
@@ -254,7 +261,7 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     'return_pickup_cancelled',
     'singari_return_pickup_cancelled',
     'Return pickup cancelled',
-    'Hello {{1}}, pickup for your Singari Sarees order {{2}} return was cancelled. We will update you after rescheduling.',
+    'Hello {{1}}, pickup for your Singari Sarees order {{2}} return was cancelled. We will update you after it is rescheduled.',
     ['Lakshmi', 'SS12345'],
     ['Customer name', 'Short order number'],
   ),
@@ -262,7 +269,7 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     'return_picked_up',
     'singari_return_picked_up',
     'Return picked up',
-    'Hello {{1}}, the return for your Singari Sarees order {{2}} has been picked up.',
+    'Hello {{1}}, the return for your Singari Sarees order {{2}} has been picked up. We will process it after inspection.',
     ['Lakshmi', 'SS12345'],
     ['Customer name', 'Short order number'],
   ),
@@ -270,7 +277,7 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     'return_completed',
     'singari_return_completed',
     'Return received',
-    'Hello {{1}}, we received the return for your Singari Sarees order {{2}}.',
+    'Hello {{1}}, we received the return for your Singari Sarees order {{2}}. Thank you for shopping with us.',
     ['Lakshmi', 'SS12345'],
     ['Customer name', 'Short order number'],
   ),
@@ -278,7 +285,7 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     'refund_coupon_issued',
     'singari_refund_coupon_issued',
     'Store credit issued',
-    'Hello {{1}}, for Singari Sarees order {{2}}, coupon {{3}} worth {{4}} has been issued. Shipping deduction: {{5}}. It expires on {{6}}.',
+    'Hello {{1}}, store credit for your Singari Sarees order {{2}} is ready. Use coupon code {{3}} worth {{4}}. Shipping deduction applied: {{5}}. This coupon expires on {{6}}. Shop again at www.singarisaree.com.',
     ['Lakshmi', 'SS12345', 'SCABC234', '₹2,400', '₹99', '15 October 2026'],
     [
       'Customer name',
@@ -293,7 +300,7 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     'customer_welcome',
     'singari_customer_welcome',
     'Welcome to Singari Sarees',
-    'Hello {{1}}, welcome to Singari Sarees. Your account is ready and you can now view your orders and favourites.',
+    'Hello {{1}}, welcome to Singari Sarees. Your account is ready. You can now view orders and favourites anytime at www.singarisaree.com.',
     ['Lakshmi'],
     ['Customer name'],
   ),
@@ -303,13 +310,13 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     language: 'en',
     category: 'MARKETING',
     headerText: 'A special update for you',
-    body: 'Hi {{1}},\n\n{{2}}\n\n{{3}}\n\nShop now: {{4}}\n\n— Singari Sarees',
+    body: 'Hello {{1}}, thank you for being part of Singari Sarees. Here is our latest update: {{2}}. More details for you: {{3}}. Shop this collection here: {{4}}. We look forward to seeing you again soon.',
     footer: 'Reply STOP to opt out',
     examples: [
       'Lakshmi',
       'Festive Sale',
-      'Discover our latest sarees today.',
-      'https://singarisarees.com/collections',
+      'Discover our latest sarees curated for every occasion.',
+      'https://www.singarisaree.com/collections',
     ],
     variableLabels: ['Customer name', 'Campaign heading', 'Campaign story', 'Campaign link'],
     status: 'DRAFT',
@@ -321,13 +328,13 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     language: 'en',
     category: 'MARKETING',
     headerText: '',
-    body: 'Hi {{1}},\n\n{{2}}\n\n{{3}}\n\nShop now: {{4}}\n\n— Singari Sarees',
+    body: 'Hello {{1}}, thank you for being part of Singari Sarees. Here is our latest update: {{2}}. More details for you: {{3}}. Shop this collection here: {{4}}. We look forward to seeing you again soon.',
     footer: 'Reply STOP to opt out',
     examples: [
       'Lakshmi',
       'Festive Sale',
-      'Discover our latest sarees today.',
-      'https://singarisarees.com/collections',
+      'Discover our latest sarees curated for every occasion.',
+      'https://www.singarisaree.com/collections',
     ],
     variableLabels: ['Customer name', 'Campaign heading', 'Campaign story', 'Campaign link'],
     status: 'DRAFT',
@@ -337,6 +344,30 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
 
 function whatsappTemplateKey(kind: WhatsAppTemplateKind): string {
   return `whatsapp_template_${kind}`;
+}
+
+export function getWhatsAppBodyMetaIssue(body: string): string | null {
+  const trimmed = body.trim();
+  if (!trimmed) return 'Template body is required';
+  if (/^\{\{\d+\}\}/.test(trimmed)) {
+    return 'Body cannot start with a variable. Add text before {{1}}.';
+  }
+  if (/\{\{\d+\}\}$/.test(trimmed)) {
+    return 'Body cannot end with a variable. Add text after the last variable.';
+  }
+  if (/(?:^|\n)\s*\{\{\d+\}\}\s*(?:\n|$)/.test(body)) {
+    return 'A variable cannot be alone on a line. Wrap every variable with surrounding text.';
+  }
+  const placeholders = [...body.matchAll(/\{\{(\d+)\}\}/g)];
+  const staticText = body.replace(/\{\{\d+\}\}/g, '').replace(/\s+/g, ' ').trim();
+  // Meta rejects short bodies with many variables (rough ratio check).
+  if (placeholders.length >= 3 && staticText.length < placeholders.length * 18) {
+    return 'Too many variables for this message length. Add more fixed text around the variables.';
+  }
+  if (placeholders.length >= 5 && staticText.length < 120) {
+    return 'This template needs more fixed text for Meta approval.';
+  }
+  return null;
 }
 
 export function validateWhatsAppTemplateRecord(record: WhatsAppTemplateRecord): void {
@@ -356,6 +387,10 @@ export function validateWhatsAppTemplateRecord(record: WhatsAppTemplateRecord): 
   }
   if (/\{\{\d+\}\}/.test(record.headerText) || /\{\{\d+\}\}/.test(record.footer)) {
     throw new ApiError(400, 'Variables are supported only in the template body');
+  }
+  const metaIssue = getWhatsAppBodyMetaIssue(record.body);
+  if (metaIssue) {
+    throw new ApiError(400, metaIssue);
   }
 }
 
@@ -410,6 +445,17 @@ export class SettingsService {
           footer: typeof value.footer === 'string' ? value.footer : fallback.footer,
           examples: Array.isArray(value.examples) ? value.examples.map(String) : fallback.examples,
         } as WhatsAppTemplateRecord;
+
+        // Refresh draft/rejected bodies that break Meta start/end/length rules.
+        const editable =
+          record.status === 'DRAFT' || record.status === 'REJECTED' || record.status === 'DISABLED';
+        if (editable && getWhatsAppBodyMetaIssue(record.body)) {
+          record.body = fallback.body;
+          record.examples = fallback.examples;
+          record.footer = fallback.footer;
+          record.headerText = fallback.headerText;
+        }
+
         return { ...record, isActive: record.isActive && hasCurrentTemplateContract(record) };
       },
     );
