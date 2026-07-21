@@ -10,9 +10,11 @@ import { Request } from 'express';
 import { paramString } from '@/utils/params';
 import { publicCache } from '@/middleware/cache';
 import { invalidateCache } from '@/utils/memory-cache';
+import { realtime } from '@/realtime/emitter';
 
 function invalidateHeroBannerCaches(): void {
   invalidateCache('storefront:homepage');
+  realtime.catalogChanged('hero-banner');
 }
 
 const router = Router();

@@ -3,6 +3,7 @@ import { prisma } from '@/config/database';
 import { localStorageService } from '@/integrations/local-storage.service';
 import { ApiError } from '@/shared/api-response';
 import { invalidateCache } from '@/utils/memory-cache';
+import { realtime } from '@/realtime/emitter';
 import {
   type WhatsAppTemplateDraftInput,
   type WhatsAppTemplateKind,
@@ -90,6 +91,7 @@ let whatsappTemplatesCache: { data: WhatsAppTemplateRecord[]; expiresAt: number 
 function invalidatePublicSettingsCache(): void {
   publicSettingsCache = null;
   invalidateCache('storefront:homepage');
+  realtime.catalogChanged('settings');
 }
 
 function invalidateWhatsAppTemplatesCache(): void {
