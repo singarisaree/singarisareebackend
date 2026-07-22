@@ -2632,19 +2632,60 @@ export class OrderService {
   }
 
   async retryPayment(orderNumber: string) {
+    await this.syncPaymentStatus(orderNumber).catch(() => undefined);
+
     const order = await prisma.order.findFirst({
-      where: { orderNumber, status: 'PAYMENT_PENDING' },
+      where: { orderNumber },
       include: { payments: true },
     });
-    if (!order) throw new ApiError(404, 'Order not found or cannot retry payment');
+    if (!order) throw new ApiError(404, 'Order not found');
+
+    if (order.payments.some((payment) => payment.status === 'SUCCESS')) {
+      throw new ApiError(400, 'This order is already paid');
+    }
+
+    if (order.status === 'FAILED') {
+      throw new ApiError(400, 'Payment failed for this order. Please place a new order.');
+    }
+
+    if (order.status !== 'PAYMENT_PENDING') {
+      throw new ApiError(400, 'This order cannot accept another payment');
+    }
+
+    const payment = order.payments[0];
+    if (!payment || payment.status !== 'PENDING') {
+      throw new ApiError(400, 'This order cannot accept another payment');
+    }
 
     if (Number(order.grandTotal) <= 0) {
       throw new ApiError(400, 'No payment is required for this order');
     }
 
-    const payment = order.payments[0];
-    if (!payment || payment.status !== 'PENDING') {
-      throw new ApiError(400, 'Payment can only be retried while it is still pending');
+    // Reuse an existing Razorpay session when one is still open — avoid duplicate charges.
+    const existingRazorpayOrderId = payment.razorpayOrderId?.trim();
+    if (existingRazorpayOrderId) {
+      try {
+        const rzOrder = await razorpayService.getOrder(existingRazorpayOrderId);
+        const rzStatus = String(rzOrder.status || '').toLowerCase();
+        if (rzStatus === 'paid') {
+          await this.syncPaymentStatus(orderNumber);
+          throw new ApiError(400, 'This order is already paid');
+        }
+        if (rzStatus === 'created' || rzStatus === 'attempted') {
+          return {
+            razorpayOrderId: existingRazorpayOrderId,
+            keyId: razorpayService.getPublicKeyId(),
+            amount: Number(rzOrder.amount),
+            currency: String(rzOrder.currency || 'INR'),
+          };
+        }
+      } catch (error) {
+        if (error instanceof ApiError) throw error;
+        logger.warn('Existing Razorpay order check failed; creating a new session', {
+          orderNumber,
+          error,
+        });
+      }
     }
 
     await runPrismaTransaction(async (tx) => {
@@ -3282,10 +3323,7 @@ export class OrderService {
     const grandTotal = formatCurrency(Number(order.grandTotal));
 
     // Email first in background queue — never blocks WhatsApp / response path
-    orderEmailService.queueStatusEmail(
-      orderId,
-      order.status === 'PAYMENT_PENDING' ? 'PAYMENT_PENDING' : 'PLACED',
-    );
+    orderEmailService.queueStatusEmail(orderId, order.status);
 
     const { sent: waSent, message: waMessage } = await whatsAppService.sendOrderStatusUpdate({
       customerPhone: order.customerPhone,

@@ -138,6 +138,27 @@ router.post(
       return;
     }
 
+    const alreadyPaid =
+      localPayment.status === 'SUCCESS' ||
+      (await prisma.order.findFirst({
+        where: { orderNumber, deletedAt: null },
+        select: { payments: { where: { status: 'SUCCESS' }, select: { id: true }, take: 1 } },
+      }))?.payments.length === 1;
+
+    if (alreadyPaid) {
+      await orderService.handlePaymentSuccess(orderNumber, {
+        razorpay_order_id: razorpayOrderId,
+        razorpay_payment_id: razorpayPaymentId,
+        razorpay_signature: razorpaySignature,
+      });
+      sendSuccess(
+        res,
+        { orderNumber, paymentStatus: 'SUCCESS', alreadyPaid: true },
+        'Payment already confirmed',
+      );
+      return;
+    }
+
     await orderService.handlePaymentSuccess(orderNumber, {
       razorpay_order_id: razorpayOrderId,
       razorpay_payment_id: razorpayPaymentId,

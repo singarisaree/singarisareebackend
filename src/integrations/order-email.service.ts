@@ -79,10 +79,10 @@ function statusCopy(status: OrderStatus): {
       };
     case 'PLACED':
       return {
-        eyebrow: 'Order received',
-        headline: 'Thank you — we have received your order',
-        body: 'Your payment is confirmed. Our team will carefully prepare your sarees for dispatch.',
-        subject: 'Order confirmed · Singari Sarees',
+        eyebrow: 'Order placed',
+        headline: 'Thank you — your order is placed',
+        body: 'We received your order and payment. Our team will carefully prepare your sarees for dispatch.',
+        subject: 'Order placed · Singari Sarees',
         ctaLabel: 'Track your order',
       };
     case 'CONFIRMED':
