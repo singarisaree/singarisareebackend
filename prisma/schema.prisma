@@ -143,6 +143,7 @@ model Product {
   sku           String    @unique
   categoryId    String    @map("category_id") @db.Uuid
   description   String    @db.Text
+  productDetails String?  @map("product_details") @db.Text
   fabric        String?
   care          String?   @db.Text
   shippingInfo  String?   @map("shipping_info") @db.Text

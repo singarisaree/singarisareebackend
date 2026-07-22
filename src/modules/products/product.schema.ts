@@ -16,6 +16,7 @@ export const createProductSchema = z.object({
   name: z.string().min(2).max(200),
   categoryId: z.string().uuid(),
   description: z.string().min(10),
+  productDetails: z.string().max(5000).optional(),
   fabric: z.string().optional(),
   care: z.string().optional(),
   shippingInfo: z.string().optional(),

@@ -430,6 +430,7 @@ export class ProductService {
           sku,
           categoryId: data.categoryId,
           description: productData.description,
+          productDetails: (productData.productDetails as string | undefined)?.trim() || null,
           price: productData.price,
           mrp: productData.mrp,
           fabric: productData.fabric as string | undefined,
@@ -550,6 +551,7 @@ export class ProductService {
             sku,
             categoryId: data.categoryId,
             description: productData.description,
+            productDetails: productData.productDetails?.trim() || null,
             price: productData.price,
             mrp: productData.mrp,
             fabric: productData.fabric,
@@ -659,6 +661,11 @@ export class ProductService {
     if (!exists) throw new ApiError(404, 'Product not found');
 
     const productData: Record<string, unknown> = { ...payload.product };
+    if ('productDetails' in productData) {
+      const raw = productData.productDetails;
+      productData.productDetails =
+        typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+    }
     if (productData.categoryId) {
       const category = await prisma.category.findFirst({
         where: { id: productData.categoryId as string, deletedAt: null },
