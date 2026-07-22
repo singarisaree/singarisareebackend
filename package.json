@@ -14,6 +14,7 @@
     "prisma:migrate:status": "node node_modules/prisma/build/index.js migrate status",
     "prisma:seed": "node node_modules/tsx/dist/cli.mjs prisma/seed.ts",
     "prisma:seed:minimal": "node node_modules/tsx/dist/cli.mjs prisma/seed-minimal.ts",
+    "migrate:ids:numeric": "node node_modules/tsx/dist/cli.mjs scripts/migrate-ids-to-numeric.ts",
     "prisma:studio": "node node_modules/prisma/build/index.js studio",
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",

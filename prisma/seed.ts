@@ -70,7 +70,7 @@ async function main() {
     {
       name: 'Royal Banarasi Red Silk Saree',
       slug: 'royal-banarasi-red-silk-saree',
-      sku: 'BAN-A1B2C3',
+      sku: '84729103',
       categoryId: createdCategories[0].id,
       description: 'A magnificent Banarasi silk saree featuring intricate gold zari brocade work on a rich crimson base. Handwoven by master artisans in Varanasi, this saree embodies centuries of weaving tradition.',
       fabric: 'Pure Banarasi Silk with Gold Zari',
@@ -88,7 +88,7 @@ async function main() {
     {
       name: 'Temple Border Kanjivaram',
       slug: 'temple-border-kanjivaram',
-      sku: 'KAN-D4E5F6',
+      sku: '47293018',
       categoryId: createdCategories[1].id,
       description: 'Authentic Kanjivaram silk saree with traditional temple border design. The contrasting pallu features intricate peacock motifs woven in pure gold zari.',
       fabric: 'Pure Kanjivaram Silk',
@@ -107,7 +107,7 @@ async function main() {
     {
       name: 'Chanderi Gold Butta Saree',
       slug: 'chanderi-gold-butta-saree',
-      sku: 'CHA-G7H8I9',
+      sku: '61938407',
       categoryId: createdCategories[2].id,
       description: 'Delicate Chanderi cotton silk saree adorned with gold butta motifs. Lightweight and breathable, perfect for summer weddings and festive occasions.',
       fabric: 'Chanderi Cotton Silk',
@@ -125,7 +125,7 @@ async function main() {
     {
       name: 'Organza Embroidered Festive Saree',
       slug: 'organza-embroidered-festive-saree',
-      sku: 'ORG-J1K2L3',
+      sku: '30572841',
       categoryId: createdCategories[3].id,
       description: 'Stunning organza saree with hand-embroidered floral patterns. The sheer fabric creates an ethereal look perfect for evening celebrations.',
       fabric: 'Pure Organza with Embroidery',
@@ -144,7 +144,7 @@ async function main() {
     {
       name: 'Handloom Cotton Jamdani',
       slug: 'handloom-cotton-jamdani',
-      sku: 'COT-M4N5O6',
+      sku: '92810456',
       categoryId: createdCategories[4].id,
       description: 'Traditional Jamdani handloom cotton saree with geometric patterns. Woven on traditional looms by skilled artisans.',
       fabric: 'Pure Handloom Cotton',

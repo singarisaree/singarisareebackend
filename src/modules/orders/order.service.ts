@@ -4,7 +4,7 @@ import { env } from '@/config/env';
 import { runPrismaTransaction } from '@/utils/prisma-transaction';
 import { ApiError } from '@/shared/api-response';
 import {
-  generateOrderNumber,
+  generateUniqueOrderNumber,
   parsePagination,
   parseCreatedAtFilter,
   addDays,
@@ -225,6 +225,16 @@ export class OrderService {
   private pendingSyncInFlight: Promise<number> | null = null;
   private pendingSyncLastStartedAt = 0;
   private static readonly PENDING_SYNC_COOLDOWN_MS = 15_000;
+
+  private async allocateOrderNumber(): Promise<string> {
+    return generateUniqueOrderNumber(async (orderNumber) => {
+      const existing = await prisma.order.findUnique({
+        where: { orderNumber },
+        select: { id: true },
+      });
+      return !!existing;
+    });
+  }
 
   async listAvailableCoupons(subtotal = 0, phone?: string, shippingCharge = 0) {
     const now = new Date();
@@ -848,7 +858,7 @@ export class OrderService {
       data.shippingAddress,
       data.customerPhone,
     );
-    const orderNumber = generateOrderNumber();
+    const orderNumber = await this.allocateOrderNumber();
     const shippingAddress = geocodingService.resolveCoordinatesForCheckout(data.shippingAddress);
     const isFreeCheckout = totals.grandTotal <= 0;
 
@@ -1036,7 +1046,7 @@ export class OrderService {
       data.shippingAddress,
       data.customerPhone,
     );
-    const orderNumber = generateOrderNumber();
+    const orderNumber = await this.allocateOrderNumber();
     const shippingAddress = await geocodingService.resolveCoordinates(data.shippingAddress);
 
     if (data.status === 'READY_TO_SHIP') {

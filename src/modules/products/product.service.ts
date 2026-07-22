@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma, PRISMA_TX_OPTIONS } from '@/config/database';
 import { ApiError } from '@/shared/api-response';
-import { slugify, generateSku, parsePagination, parseCreatedAtFilter, randomBaseSoldCount } from '@/utils/helpers';
+import { slugify, generateUniqueSku, parsePagination, parseCreatedAtFilter, randomBaseSoldCount } from '@/utils/helpers';
 import { buildPaginationMeta } from '@/shared/api-response';
 import { localStorageService } from '@/integrations/local-storage.service';
 import { STORE_CACHE_TTL_MS, ADMIN_LIST_CACHE_TTL_MS, withCache, invalidateCache } from '@/utils/memory-cache';
@@ -125,6 +125,16 @@ const storefrontProductInclude = {
 };
 
 export class ProductService {
+  private async allocateSku(): Promise<string> {
+    return generateUniqueSku(async (sku) => {
+      const existing = await prisma.product.findUnique({
+        where: { sku },
+        select: { id: true },
+      });
+      return !!existing;
+    });
+  }
+
   private buildListWhere(
     query: {
       search?: string;
@@ -418,7 +428,7 @@ export class ProductService {
     const slug = slugify(data.name);
     const existingSlug = await prisma.product.findFirst({ where: { slug } });
     const finalSlug = existingSlug ? `${slug}-${Date.now()}` : slug;
-    const sku = generateSku(category.slug.substring(0, 3).toUpperCase());
+    const sku = await this.allocateSku();
 
     const { colors, ...productData } = data;
 
@@ -521,7 +531,7 @@ export class ProductService {
     const slug = slugify(data.name);
     const existingSlug = await prisma.product.findFirst({ where: { slug } });
     const finalSlug = existingSlug ? `${slug}-${Date.now()}` : slug;
-    const sku = generateSku(category.slug.substring(0, 3).toUpperCase());
+    const sku = await this.allocateSku();
 
     const uploadedPublicIds: string[] = [];
     const uploadsByIndex = new Map<number, Array<{ url: string; publicId: string }>>();

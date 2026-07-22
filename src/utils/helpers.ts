@@ -8,21 +8,54 @@ export function slugify(text: string): string {
 }
 
 export function generateOrderNumber(): string {
-  // Short customer-facing order ID (8 chars). Displayed as-is across the app.
-  const time = Date.now().toString(36).toUpperCase().slice(-4);
-  const random = Math.random().toString(36).substring(2, 6).toUpperCase();
-  return `${time}${random}`;
+  // 8-digit numeric customer-facing order ID (e.g. 84729301).
+  const timePart = Date.now().toString().slice(-5);
+  const randomPart = Math.floor(Math.random() * 1000)
+    .toString()
+    .padStart(3, '0');
+  return `${timePart}${randomPart}`;
 }
 
-/** Last 8 characters — consistent short order ID for UI / WhatsApp / prints. */
+export async function generateUniqueOrderNumber(
+  exists: (orderNumber: string) => Promise<boolean>,
+  maxAttempts = 8,
+): Promise<string> {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const orderNumber = generateOrderNumber();
+    if (!(await exists(orderNumber))) return orderNumber;
+  }
+  throw new Error('Failed to generate unique order number');
+}
+
+/** Customer-facing order ID for UI / WhatsApp / prints. Numeric IDs shown as-is. */
 export function formatShortOrderNumber(orderNumber: string): string {
   if (!orderNumber) return '';
-  return orderNumber.length > 8 ? orderNumber.slice(-8) : orderNumber;
+  const trimmed = orderNumber.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return trimmed.length > 8 ? trimmed.slice(-8) : trimmed;
+  }
+  // Legacy alphanumeric order numbers (pre-migration).
+  return trimmed.length > 8 ? trimmed.slice(-8) : trimmed;
 }
 
-export function generateSku(categoryCode: string): string {
-  const random = Math.random().toString(36).substring(2, 8).toUpperCase();
-  return `${categoryCode}-${random}`;
+export function generateSku(): string {
+  // 8-digit numeric SKU (e.g. 47293018).
+  const timePart = Date.now().toString().slice(-5);
+  const randomPart = Math.floor(Math.random() * 1000)
+    .toString()
+    .padStart(3, '0');
+  return `${timePart}${randomPart}`;
+}
+
+export async function generateUniqueSku(
+  exists: (sku: string) => Promise<boolean>,
+  maxAttempts = 8,
+): Promise<string> {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const sku = generateSku();
+    if (!(await exists(sku))) return sku;
+  }
+  throw new Error('Failed to generate unique SKU');
 }
 
 export function calculateSoldCount(baseSoldCount: number, actualSold: number): number {
