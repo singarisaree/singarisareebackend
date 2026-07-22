@@ -512,6 +512,10 @@ export class ShippingService {
     });
     invalidateCache('dashboard:');
 
+    void this.notifyFulfillmentStatus(orderId, 'SHIPPED', data.trackingUrl).catch((err) =>
+      logger.warn('Manual ship notification failed', { orderId, err }),
+    );
+
     return shipping;
   }
 
@@ -1789,10 +1793,13 @@ export class ShippingService {
     });
     invalidateCache('dashboard:');
 
-    if (['SHIPPED', 'IN_TRANSIT', 'DELIVERED', 'RTO'].includes(nextStatus)) {
+    if (['SHIPPED', 'IN_TRANSIT', 'DELIVERED', 'RTO', 'CANCELLED', 'READY_TO_SHIP'].includes(nextStatus)) {
       void this.notifyFulfillmentStatus(orderId, nextStatus, trackingUrl).catch((err) =>
         logger.warn('Fulfillment WhatsApp notify failed', { orderId, nextStatus, err }),
       );
+    } else {
+      // Always email on any Shiprocket-driven status change, even if WhatsApp is skipped.
+      orderEmailService.queueStatusEmail(orderId, nextStatus);
     }
 
     return true;
@@ -1927,6 +1934,12 @@ export class ShippingService {
       grandTotal: Number(order.grandTotal),
     });
     invalidateCache('dashboard:');
+
+    const trackingUrl =
+      awbCode != null ? `https://shiprocket.co/tracking/${awbCode}` : order.shipping?.trackingUrl;
+    void this.notifyFulfillmentStatus(orderId, 'SHIPPED', trackingUrl).catch((err) =>
+      logger.warn('AWB assign notification failed', { orderId, err }),
+    );
 
     return result;
   }

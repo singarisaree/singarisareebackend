@@ -2139,23 +2139,7 @@ export class OrderService {
       }
     });
 
-    if (
-      statusChanged &&
-      [
-        'PLACED',
-        'CONFIRMED',
-        'READY_TO_SHIP',
-        'SHIPPED',
-        'IN_TRANSIT',
-        'DELIVERED',
-        'CANCELLED',
-        'REFUNDED',
-        'RTO',
-        'RETURNED',
-        'FAILED',
-        'PAYMENT_PENDING',
-      ].includes(nextStatus)
-    ) {
+    if (statusChanged) {
       void this.sendStatusNotification(id, nextStatus).catch((err) =>
         logger.warn('Escalation status notification failed', {
           orderId: id,
@@ -2302,26 +2286,9 @@ export class OrderService {
       }
     });
 
-    if (
-      [
-        'PLACED',
-        'CONFIRMED',
-        'READY_TO_SHIP',
-        'SHIPPED',
-        'IN_TRANSIT',
-        'DELIVERED',
-        'CANCELLED',
-        'REFUNDED',
-        'RTO',
-        'RETURNED',
-        'FAILED',
-        'PAYMENT_PENDING',
-      ].includes(status)
-    ) {
-      void this.sendStatusNotification(id, status).catch((err) =>
-        logger.warn('Status notification failed', { orderId: id, status, err }),
-      );
-    }
+    void this.sendStatusNotification(id, status).catch((err) =>
+      logger.warn('Status notification failed', { orderId: id, status, err }),
+    );
 
     invalidateCache('dashboard:');
     realtime.orderStatusChanged({

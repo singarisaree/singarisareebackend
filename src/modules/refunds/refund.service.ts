@@ -16,6 +16,7 @@ import { invalidateCache } from '@/utils/memory-cache';
 import { realtime } from '@/realtime/emitter';
 import { areAllOrderItemsFullyReturned } from '@/modules/orders/order-tracking.sync';
 import { whatsAppService } from '@/integrations/whatsapp.service';
+import { orderEmailService } from '@/integrations/order-email.service';
 import { logger } from '@/utils/logger';
 
 const refundListInclude = {
@@ -433,6 +434,10 @@ export class RefundService {
       customerPhone: updated.customerPhone,
       refundAmount: Number(updated.refundAmount ?? data.couponAmount),
     });
+
+    if (!result.isPartialOnly) {
+      orderEmailService.queueStatusEmail(updated.id, OrderStatus.REFUNDED);
+    }
 
     void (async () => {
       const notification = await whatsAppService.sendRefundCouponIssued({

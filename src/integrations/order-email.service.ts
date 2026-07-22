@@ -28,17 +28,17 @@ type OrderEmailPayload = {
 
 const EMAIL_STATUSES = new Set<OrderStatus>([
   'PLACED',
+  'PAYMENT_PENDING',
   'CONFIRMED',
   'READY_TO_SHIP',
   'SHIPPED',
   'IN_TRANSIT',
   'DELIVERED',
-  'CANCELLED',
-  'REFUNDED',
-  'RTO',
   'RETURNED',
+  'CANCELLED',
   'FAILED',
-  'PAYMENT_PENDING',
+  'RTO',
+  'REFUNDED',
 ]);
 
 function escapeHtml(value: string): string {
