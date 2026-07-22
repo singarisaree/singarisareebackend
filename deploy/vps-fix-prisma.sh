@@ -26,3 +26,4 @@ npm run prisma:generate
 npm run prisma:migrate:deploy
 
 echo "==> Done. Continue with: npm run build && pm2 restart singari-api"
+echo "Or run the full fix: bash deploy/vps-fix-build.sh"

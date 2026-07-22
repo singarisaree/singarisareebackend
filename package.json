@@ -5,7 +5,8 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "node node_modules/typescript/bin/tsc && node node_modules/tsc-alias/dist/bin/index.js",
+    "prebuild": "node node_modules/prisma/build/index.js generate",
+    "build": "npm run prisma:generate && node node_modules/typescript/bin/tsc && node node_modules/tsc-alias/dist/bin/index.js",
     "start": "node dist/server.js",
     "prisma:generate": "node node_modules/prisma/build/index.js generate",
     "prisma:migrate": "node node_modules/prisma/build/index.js migrate dev",
