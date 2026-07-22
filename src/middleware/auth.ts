@@ -30,16 +30,34 @@ export interface CustomerAuthenticatedRequest extends Request {
   customerSessionId?: string;
 }
 
+function readAdminAccessToken(req: Request): string | null {
+  return (
+    (req.cookies?.accessToken as string | undefined) ||
+    (req.headers.authorization?.startsWith('Bearer ')
+      ? req.headers.authorization.slice(7)
+      : null) ||
+    null
+  );
+}
+
+/** Lightweight JWT check for middleware that runs before route handlers (e.g. rate limiting). */
+export function hasValidAdminSession(req: Request): boolean {
+  const token = readAdminAccessToken(req);
+  if (!token) return false;
+  try {
+    const decoded = jwt.verify(token, env.JWT_ACCESS_SECRET) as JwtPayload;
+    return Boolean(decoded.sub && decoded.role);
+  } catch {
+    return false;
+  }
+}
+
 export function authenticateAdmin(
   req: AuthenticatedRequest,
   _res: Response,
   next: NextFunction,
 ): void {
-  const token =
-    req.cookies?.accessToken ||
-    (req.headers.authorization?.startsWith('Bearer ')
-      ? req.headers.authorization.slice(7)
-      : null);
+  const token = readAdminAccessToken(req);
 
   if (!token) {
     next(new ApiError(401, 'Authentication required'));

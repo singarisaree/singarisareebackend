@@ -6,6 +6,7 @@ import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
 import { env, isDevelopment } from '@/config/env';
 import { logger } from '@/utils/logger';
+import { hasValidAdminSession } from '@/middleware/auth';
 import { errorHandler, notFoundHandler } from '@/middleware/validate';
 import { UPLOADS_DIR } from '@/integrations/local-storage.service';
 
@@ -109,7 +110,11 @@ export function createApp(): Application {
       max: parseInt(env.RATE_LIMIT_MAX_REQUESTS, 10),
       standardHeaders: true,
       legacyHeaders: false,
-      skip: (req) => isStorefrontRead(req) || isCheckoutMutation(req) || isWhatsAppWebhook(req),
+      skip: (req) =>
+        hasValidAdminSession(req) ||
+        isStorefrontRead(req) ||
+        isCheckoutMutation(req) ||
+        isWhatsAppWebhook(req),
       message: { success: false, message: 'Too many requests, please try again later' },
     }),
   );
