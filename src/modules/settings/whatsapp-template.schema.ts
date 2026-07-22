@@ -1,5 +1,15 @@
 import { z } from 'zod';
 
+/** Admin-only preview path. Accept https URLs, `/uploads/...`, or drop invalid values. */
+const optionalHeaderPreviewUrlSchema = z.preprocess((value) => {
+  if (value == null) return undefined;
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.startsWith('blob:')) return undefined;
+  if (/^https?:\/\//i.test(trimmed) || /^\/uploads\//.test(trimmed)) return trimmed;
+  return undefined;
+}, z.string().max(4000).optional());
+
 export const orderStatusTemplateKinds = {
   PLACED: 'order_placed',
   PAYMENT_PENDING: 'order_payment_pending',
@@ -49,6 +59,7 @@ export const whatsappTemplateKinds = [
   'return_completed',
   'refund_coupon_issued',
   'customer_welcome',
+  'customer_login_otp',
   'marketing_text',
   'marketing_image',
 ] as const;
@@ -83,14 +94,14 @@ export const whatsappTemplateDraftSchema = z.object({
   footer: z.string().trim().max(60).default(''),
   examples: z.array(z.string().trim().min(1).max(200)).max(10),
   headerHandle: z.string().trim().max(4000).optional(),
-  headerPreviewUrl: z.string().url().max(4000).optional(),
+  headerPreviewUrl: optionalHeaderPreviewUrlSchema,
 });
 
 export type WhatsAppTemplateDraftInput = z.infer<typeof whatsappTemplateDraftSchema>;
 
 export interface WhatsAppTemplateRecord extends WhatsAppTemplateDraftInput {
   kind: WhatsAppTemplateKind;
-  category: 'UTILITY' | 'MARKETING';
+  category: 'UTILITY' | 'MARKETING' | 'AUTHENTICATION';
   variableLabels: string[];
   status: WhatsAppTemplateStatus;
   isActive: boolean;

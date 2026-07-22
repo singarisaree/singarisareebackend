@@ -3,6 +3,7 @@ import { Response } from 'express';
 import { prisma } from '@/config/database';
 import { env, isDevelopment } from '@/config/env';
 import { sentService } from '@/integrations/sent.service';
+import { whatsAppService } from '@/integrations/whatsapp.service';
 import { ApiError } from '@/shared/api-response';
 import { logger } from '@/utils/logger';
 import { whatsAppOutboxService } from '@/modules/whatsapp-outbox/whatsapp-outbox.service';
@@ -68,55 +69,86 @@ export class CustomerAuthService {
   async sendOtp(phoneRaw: string): Promise<{
     phone: string;
     expiresInSeconds: number;
-    /** Dev-only fallback when Sent.dm keys are not set */
+    /** Dev-only fallback when providers are not configured */
     debugOtp?: string;
+    /** Channels that accepted the same OTP (user can use either message). */
+    channels: Array<'whatsapp' | 'sms' | 'debug'>;
   }> {
     const phone = normalizePhone(phoneRaw);
-
-    const recent = await prisma.customerOtpChallenge.findFirst({
-      where: {
-        phone,
-        consumedAt: null,
-        createdAt: { gte: new Date(Date.now() - OTP_RESEND_COOLDOWN_MS) },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
-    if (recent) {
-      throw new ApiError(429, 'Please wait a moment before requesting another OTP');
-    }
-
     const otp = generateOtp();
     const expiresAt = new Date(Date.now() + OTP_TTL_MS);
 
-    await prisma.customerOtpChallenge.create({
-      data: {
-        phone,
-        otpHash: hashOtp(phone, otp),
-        expiresAt,
-      },
-    });
-
-    const sent = await sentService.sendOtp(phone, otp);
-
-    if (!sent) {
-      if (isDevelopment || !sentService.isConfigured()) {
-        logger.warn('Sent.dm OTP not delivered — exposing debug OTP in non-production', {
-          phone,
+    // Serialize create + cooldown check so a double-click cannot send two OTPs.
+    try {
+      await prisma.$transaction(async (tx) => {
+        const recent = await tx.customerOtpChallenge.findFirst({
+          where: {
+            phone,
+            consumedAt: null,
+            createdAt: { gte: new Date(Date.now() - OTP_RESEND_COOLDOWN_MS) },
+          },
+          orderBy: { createdAt: 'desc' },
         });
-        console.info(`[customer-auth] OTP for ${phone}: ${otp}`);
-        return {
-          phone,
-          expiresInSeconds: Math.floor(OTP_TTL_MS / 1000),
-          debugOtp: otp,
-        };
-      }
-      throw new ApiError(503, 'OTP service is not configured. Add SENT_DM_API_KEY and OTP template.');
+        if (recent) {
+          throw new ApiError(429, 'Please wait a moment before requesting another OTP');
+        }
+
+        await tx.customerOtpChallenge.create({
+          data: {
+            phone,
+            otpHash: hashOtp(phone, otp),
+            expiresAt,
+          },
+        });
+      });
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw error;
     }
 
-    return {
+    // Same OTP on WhatsApp + SMS so the customer can use either message.
+    const [waResult, smsSent] = await Promise.all([
+      whatsAppService.sendLoginOtp({ phone, otp }),
+      sentService.sendOtp(phone, otp),
+    ]);
+
+    const channels: Array<'whatsapp' | 'sms' | 'debug'> = [];
+    if (waResult.sent) channels.push('whatsapp');
+    if (smsSent) channels.push('sms');
+
+    if (channels.length > 0) {
+      return {
+        phone,
+        expiresInSeconds: Math.floor(OTP_TTL_MS / 1000),
+        channels,
+      };
+    }
+
+    if (isDevelopment || (!sentService.isConfigured() && !(await whatsAppService.isLoginOtpConfigured()))) {
+      logger.warn('Login OTP not delivered — exposing debug OTP in non-production', {
+        phone,
+        whatsappError: waResult.error,
+      });
+      console.info(`[customer-auth] OTP for ${phone}: ${otp}`);
+      return {
+        phone,
+        expiresInSeconds: Math.floor(OTP_TTL_MS / 1000),
+        debugOtp: otp,
+        channels: ['debug'],
+      };
+    }
+
+    logger.warn('Login OTP failed on WhatsApp and SMS', {
       phone,
-      expiresInSeconds: Math.floor(OTP_TTL_MS / 1000),
-    };
+      whatsappError: waResult.error,
+    });
+
+    throw new ApiError(
+      503,
+      waResult.error
+        ? `Could not send login OTP (${waResult.error}). Activate the Meta WhatsApp login OTP template and/or configure Sent.dm SMS.`
+        : 'Could not send login OTP. Activate the Meta WhatsApp login OTP template and/or configure Sent.dm SMS.',
+    );
   }
 
   async verifyOtp(options: {

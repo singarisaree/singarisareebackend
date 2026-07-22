@@ -24,8 +24,8 @@ function buildOtpTemplate(templateId: string, parameters: Record<string, string>
 }
 
 /**
- * Sent.dm — OTP login only for now.
- * Order/shipping/marketing WhatsApp can be wired later.
+ * Sent.dm — customer login OTP via SMS only.
+ * Order / shipping / marketing WhatsApp uses Meta Cloud API separately.
  */
 class SentService {
   private client: SentDm | null = null;
@@ -69,7 +69,8 @@ class SentService {
           code: otp,
           otp,
         }),
-        channel: ['whatsapp', 'sms'],
+        // SMS only — do not also send on WhatsApp (that delivered the same OTP twice).
+        channel: ['sms'],
       });
 
       logger.info('Sent.dm OTP accepted', {

@@ -45,6 +45,8 @@ export function buildWhatsAppTemplatePayload(options: {
   language: string;
   bodyParameters: string[];
   imageUrl?: string;
+  /** Meta AUTHENTICATION OTP templates require the code on body + copy-code button. */
+  otpCopyCode?: boolean;
 }): Record<string, unknown> {
   const components: Array<Record<string, unknown>> = [];
   if (options.imageUrl?.trim()) {
@@ -57,6 +59,14 @@ export function buildWhatsAppTemplatePayload(options: {
     components.push({
       type: 'body',
       parameters: options.bodyParameters.map((text): TemplateParameter => ({ type: 'text', text })),
+    });
+  }
+  if (options.otpCopyCode && options.bodyParameters[0]) {
+    components.push({
+      type: 'button',
+      sub_type: 'url',
+      index: '0',
+      parameters: [{ type: 'text', text: options.bodyParameters[0] }],
     });
   }
 
@@ -74,6 +84,40 @@ export function buildWhatsAppTemplatePayload(options: {
 }
 
 export function buildMetaTemplateSubmission(record: WhatsAppTemplateRecord) {
+  // Meta authentication OTP templates use a fixed structure (not free-form body text).
+  if (record.kind === 'customer_login_otp' || record.category === 'AUTHENTICATION') {
+    const sampleCode = record.examples[0]?.trim() || '123456';
+    return {
+      name: record.name,
+      language: record.language,
+      category: 'AUTHENTICATION',
+      message_send_ttl_seconds: 600,
+      components: [
+        {
+          type: 'BODY',
+          add_security_recommendation: true,
+          example: {
+            body_text: [[sampleCode]],
+          },
+        },
+        {
+          type: 'FOOTER',
+          code_expiration_minutes: 10,
+        },
+        {
+          type: 'BUTTONS',
+          buttons: [
+            {
+              type: 'OTP',
+              otp_type: 'COPY_CODE',
+              text: 'Copy code',
+            },
+          ],
+        },
+      ],
+    };
+  }
+
   const components: Array<Record<string, unknown>> = [];
   if (record.kind === 'marketing_image') {
     if (!record.headerHandle) {
@@ -252,6 +296,7 @@ export class WhatsAppService {
     bodyParameters: string[];
     imageUrl?: string;
     templateConfig?: WhatsAppRuntimeTemplateConfig;
+    otpCopyCode?: boolean;
   }): Promise<WhatsAppSendResult> {
     const client = this.getClient();
     const config = options.templateConfig ?? (await this.resolveTemplateConfig(options.kind));
@@ -279,6 +324,7 @@ export class WhatsAppService {
           language: config.language,
           bodyParameters: options.bodyParameters,
           imageUrl: options.imageUrl,
+          otpCopyCode: options.otpCopyCode,
         }),
       );
       const messageId = response.data?.messages?.[0]?.id as string | undefined;
@@ -292,6 +338,22 @@ export class WhatsAppService {
       logger.error('WhatsApp Cloud API send failed', { to, templateName, error: message });
       return { sent: false, error: message };
     }
+  }
+
+  async sendLoginOtp(data: { phone: string; otp: string }): Promise<WhatsAppSendResult> {
+    const otp = data.otp.trim();
+    return this.sendTemplate({
+      to: data.phone,
+      kind: 'customer_login_otp',
+      bodyParameters: [otp],
+      otpCopyCode: true,
+    });
+  }
+
+  async isLoginOtpConfigured(): Promise<boolean> {
+    if (!this.isConfigured()) return false;
+    const config = await this.resolveTemplateConfig('customer_login_otp');
+    return Boolean(config.name);
   }
 
   async uploadTemplateSample(

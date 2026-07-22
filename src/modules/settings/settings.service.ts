@@ -304,6 +304,20 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
     ['Lakshmi'],
     ['Customer name'],
   ),
+  customer_login_otp: {
+    kind: 'customer_login_otp',
+    name: 'singari_customer_login_otp',
+    language: 'en',
+    category: 'AUTHENTICATION',
+    headerText: '',
+    // Preview copy for Admin; Meta AUTHENTICATION templates use a fixed OTP layout.
+    body: 'Your Singari Sarees login code is {{1}}. It expires in 10 minutes. Do not share this code with anyone.',
+    footer: 'Code expires in 10 minutes',
+    examples: ['482915'],
+    variableLabels: ['Login OTP code'],
+    status: 'DRAFT',
+    isActive: false,
+  },
   marketing_text: {
     kind: 'marketing_text',
     name: 'singari_marketing_text',
