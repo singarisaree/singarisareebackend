@@ -72,7 +72,6 @@ export function renderMarketingMessage(
     replaceName(story.trim()),
     '',
     '— Team Singari Sarees',
-    'https://www.singarisaree.com',
   ];
 
   return lines.join('\n');

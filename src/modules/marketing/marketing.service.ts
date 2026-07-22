@@ -25,7 +25,8 @@ export class MarketingService {
 
   async uploadImage(file: Express.Multer.File) {
     const upload = await localStorageService.uploadImage(file.buffer, 'marketing');
-    return { imageUrl: upload.url, publicId: upload.publicId };
+    const publicUrl = toPublicImageUrl(upload.url);
+    return { imageUrl: upload.url, publicUrl, publicId: upload.publicId };
   }
 
   async sendCampaign(

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { optionalStoredImagePathSchema } from '@/utils/stored-image-path';
 
 export const previewMarketingSchema = z.object({
   heading: z.string().min(1).max(200),
@@ -14,7 +15,7 @@ export const sendMarketingSchema = z.object({
     .string()
     .url()
     .refine((value) => /^https?:\/\//i.test(value), 'Link must start with http:// or https://'),
-  imageUrl: z.string().url().optional().or(z.literal('')),
+  imageUrl: optionalStoredImagePathSchema,
   customerIds: z.array(z.string().uuid()).optional(),
   sendToAll: z.boolean().optional().default(false),
 });
