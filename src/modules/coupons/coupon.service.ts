@@ -26,6 +26,7 @@ export class CouponService {
     const createdAt = parseCreatedAtFilter(query);
     const where = {
       deletedAt: null,
+      isRefundCoupon: false,
       ...(query.isActive === 'true' || query.isActive === 'false'
         ? { isActive: query.isActive === 'true' }
         : {}),
@@ -44,7 +45,9 @@ export class CouponService {
   }
 
   async findById(id: string) {
-    const coupon = await prisma.coupon.findFirst({ where: { id, deletedAt: null } });
+    const coupon = await prisma.coupon.findFirst({
+      where: { id, deletedAt: null, isRefundCoupon: false },
+    });
     if (!coupon) throw new ApiError(404, 'Coupon not found');
     return coupon;
   }
@@ -59,6 +62,7 @@ export class CouponService {
       data: {
         ...data,
         code: data.code.toUpperCase(),
+        isRefundCoupon: false,
         startsAt: data.startsAt ? new Date(data.startsAt) : undefined,
         expiresAt: data.expiresAt ? new Date(data.expiresAt) : undefined,
       },
@@ -66,7 +70,9 @@ export class CouponService {
   }
 
   async update(id: string, data: z.infer<typeof updateCouponSchema>) {
-    const coupon = await prisma.coupon.findFirst({ where: { id, deletedAt: null } });
+    const coupon = await prisma.coupon.findFirst({
+      where: { id, deletedAt: null, isRefundCoupon: false },
+    });
     if (!coupon) throw new ApiError(404, 'Coupon not found');
 
     if (data.code) {
@@ -84,6 +90,7 @@ export class CouponService {
       where: { id },
       data: {
         ...data,
+        isRefundCoupon: false,
         ...(data.code && { code: data.code.toUpperCase() }),
         ...(data.startsAt !== undefined && {
           startsAt: data.startsAt ? new Date(data.startsAt) : null,
@@ -96,7 +103,9 @@ export class CouponService {
   }
 
   async softDelete(id: string) {
-    const coupon = await prisma.coupon.findFirst({ where: { id, deletedAt: null } });
+    const coupon = await prisma.coupon.findFirst({
+      where: { id, deletedAt: null, isRefundCoupon: false },
+    });
     if (!coupon) throw new ApiError(404, 'Coupon not found');
 
     await prisma.coupon.update({

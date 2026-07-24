@@ -6,7 +6,7 @@ import { asyncHandler } from '@/middleware/validate';
 import { sendSuccess } from '@/shared/api-response';
 import { prisma } from '@/config/database';
 import { logger } from '@/utils/logger';
-import { env, isProduction } from '@/config/env';
+import { env } from '@/config/env';
 
 const SUCCESSFUL_ORDER_STATUSES = new Set([
   'PLACED',
@@ -39,17 +39,21 @@ router.post(
     const signature = String(req.headers['x-razorpay-signature'] || '').trim();
     const rawBody = (req as RequestWithRawBody).rawBody?.toString('utf8') ?? '';
 
-    const secretConfigured = Boolean(env.RAZORPAY_WEBHOOK_SECRET?.trim());
-    if (secretConfigured || isProduction) {
-      if (!signature || !rawBody) {
-        res.status(401).json({ success: false, message: 'Missing webhook signature' });
-        return;
-      }
-      const isValid = razorpayService.verifyWebhookSignature(rawBody, signature);
-      if (!isValid) {
-        res.status(401).json({ success: false, message: 'Invalid webhook signature' });
-        return;
-      }
+    if (!env.RAZORPAY_WEBHOOK_SECRET?.trim()) {
+      logger.warn('Razorpay webhook rejected: RAZORPAY_WEBHOOK_SECRET is not configured');
+      res.status(503).json({ success: false, message: 'Webhook secret not configured' });
+      return;
+    }
+
+    if (!signature || !rawBody) {
+      res.status(401).json({ success: false, message: 'Missing webhook signature' });
+      return;
+    }
+
+    const isValid = razorpayService.verifyWebhookSignature(rawBody, signature);
+    if (!isValid) {
+      res.status(401).json({ success: false, message: 'Invalid webhook signature' });
+      return;
     }
 
     const event = String(req.body?.event || '');
@@ -137,6 +141,7 @@ router.post(
 
     const { orderNumber, razorpayOrderId, razorpayPaymentId, razorpaySignature } = parsed.data;
 
+    // 1) HMAC signature from Razorpay Checkout (order_id|payment_id)
     const isValid = razorpayService.verifyPaymentSignature({
       orderId: razorpayOrderId,
       paymentId: razorpayPaymentId,
@@ -144,17 +149,56 @@ router.post(
     });
 
     if (!isValid) {
+      logger.warn('Razorpay payment signature rejected', {
+        orderNumber,
+        razorpayOrderId,
+        razorpayPaymentId,
+      });
       res.status(400).json({ success: false, message: 'Invalid payment signature' });
       return;
     }
 
     const localPayment = await prisma.payment.findFirst({
       where: { razorpayOrderId },
-      include: { order: { select: { orderNumber: true } } },
+      include: { order: { select: { orderNumber: true, grandTotal: true } } },
     });
 
     if (!localPayment || localPayment.order.orderNumber !== orderNumber) {
       res.status(400).json({ success: false, message: 'Payment does not match this order' });
+      return;
+    }
+
+    // 2) Confirm payment with Razorpay API (amount + status + order binding)
+    const remotePayment = await razorpayService.getPayment(razorpayPaymentId);
+    if (!remotePayment) {
+      res.status(400).json({ success: false, message: 'Could not confirm payment with Razorpay' });
+      return;
+    }
+
+    const remoteOrderId = String(remotePayment.order_id || '').trim();
+    if (remoteOrderId !== razorpayOrderId) {
+      res.status(400).json({ success: false, message: 'Payment order mismatch' });
+      return;
+    }
+
+    const remoteStatus = String(remotePayment.status || '').toLowerCase();
+    if (remoteStatus !== 'captured' && remoteStatus !== 'authorized') {
+      res.status(400).json({
+        success: false,
+        message: `Payment not successful (status: ${remoteStatus || 'unknown'})`,
+      });
+      return;
+    }
+
+    const expectedPaise = razorpayService.toPaise(Number(localPayment.amount));
+    const paidPaise = Number(remotePayment.amount);
+    if (!Number.isFinite(paidPaise) || paidPaise !== expectedPaise) {
+      logger.warn('Razorpay payment amount mismatch', {
+        orderNumber,
+        expectedPaise,
+        paidPaise,
+      });
+      res.status(400).json({ success: false, message: 'Payment amount mismatch' });
       return;
     }
 
@@ -170,6 +214,7 @@ router.post(
         razorpay_order_id: razorpayOrderId,
         razorpay_payment_id: razorpayPaymentId,
         razorpay_signature: razorpaySignature,
+        verified: true,
       });
       sendSuccess(
         res,
@@ -183,6 +228,9 @@ router.post(
       razorpay_order_id: razorpayOrderId,
       razorpay_payment_id: razorpayPaymentId,
       razorpay_signature: razorpaySignature,
+      verified: true,
+      amount: remotePayment.amount,
+      status: remotePayment.status,
     });
 
     sendSuccess(res, { orderNumber, paymentStatus: 'SUCCESS' }, 'Payment verified');

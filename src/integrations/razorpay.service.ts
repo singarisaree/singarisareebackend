@@ -114,20 +114,41 @@ export class RazorpayService {
     }
   }
 
+  async getPayment(razorpayPaymentId: string): Promise<RazorpayPaymentEntity | null> {
+    try {
+      const payment = await this.getClient().payments.fetch(razorpayPaymentId);
+      return payment as unknown as RazorpayPaymentEntity;
+    } catch (error) {
+      logger.error('Razorpay get payment failed', { razorpayPaymentId, error });
+      return null;
+    }
+  }
+
+  /**
+   * Checkout success HMAC:
+   * HMAC_SHA256(order_id + "|" + payment_id, key_secret) === razorpay_signature
+   */
   verifyPaymentSignature(params: {
     orderId: string;
     paymentId: string;
     signature: string;
   }): boolean {
-    if (!env.RAZORPAY_KEY_SECRET?.trim()) return false;
-    const payload = `${params.orderId}|${params.paymentId}`;
+    const secret = env.RAZORPAY_KEY_SECRET?.trim();
+    if (!secret) return false;
+
+    const orderId = params.orderId.trim();
+    const paymentId = params.paymentId.trim();
+    const signature = params.signature.trim().toLowerCase();
+    if (!orderId || !paymentId || !signature) return false;
+
     const expected = crypto
-      .createHmac('sha256', env.RAZORPAY_KEY_SECRET)
-      .update(payload)
+      .createHmac('sha256', secret)
+      .update(`${orderId}|${paymentId}`)
       .digest('hex');
+
     try {
-      const a = Buffer.from(params.signature);
-      const b = Buffer.from(expected);
+      const a = Buffer.from(signature, 'utf8');
+      const b = Buffer.from(expected, 'utf8');
       if (a.length !== b.length) return false;
       return crypto.timingSafeEqual(a, b);
     } catch {
@@ -135,15 +156,20 @@ export class RazorpayService {
     }
   }
 
+  /** Webhook HMAC over the raw request body. Fails closed if secret is missing. */
   verifyWebhookSignature(rawBody: string, signature: string): boolean {
-    if (!env.RAZORPAY_WEBHOOK_SECRET?.trim()) return true;
+    const secret = env.RAZORPAY_WEBHOOK_SECRET?.trim();
+    if (!secret) return false;
+    if (!rawBody || !signature.trim()) return false;
+
     const expected = crypto
-      .createHmac('sha256', env.RAZORPAY_WEBHOOK_SECRET)
+      .createHmac('sha256', secret)
       .update(rawBody)
       .digest('hex');
+
     try {
-      const a = Buffer.from(signature);
-      const b = Buffer.from(expected);
+      const a = Buffer.from(signature.trim().toLowerCase(), 'utf8');
+      const b = Buffer.from(expected, 'utf8');
       if (a.length !== b.length) return false;
       return crypto.timingSafeEqual(a, b);
     } catch {

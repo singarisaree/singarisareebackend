@@ -6,7 +6,12 @@ import { MAX_INSTAGRAM_REELS } from './instagram.schema';
 /** Canonical permalink Instagram embed.js expects. */
 export function normalizeInstagramPermalink(raw: string): string {
   const url = new URL(raw.trim());
-  const path = url.pathname.replace(/\/+$/, '') + '/';
+  let path = url.pathname.replace(/\/+$/, '');
+  // Prefer /reel/ over /reels/ for embed.js
+  path = path.replace(/^\/reels\//i, '/reel/');
+  // /share/reel/CODE → /reel/CODE when possible
+  path = path.replace(/^\/share\/(reel|reels|p|tv)\//i, '/$1/').replace(/^\/reels\//i, '/reel/');
+  if (!path.endsWith('/')) path += '/';
   return `https://www.instagram.com${path}`;
 }
 
