@@ -1,15 +1,15 @@
 import { Router, Response, Request } from 'express';
 import { instagramService } from './instagram.service';
 import {
-  createInstagramReelSchema,
+  createInstagramReelFieldsSchema,
   reorderInstagramReelsSchema,
-  updateInstagramReelSchema,
+  updateInstagramReelFieldsSchema,
 } from './instagram.schema';
 import { validateBody, validateParams, asyncHandler } from '@/middleware/validate';
 import { authenticateAdmin, loadAdmin, AuthenticatedRequest } from '@/middleware/auth';
 import { sendSuccess } from '@/shared/api-response';
 import { idParamSchema } from '@/modules/auth/auth.schema';
-import { uploadSingle } from '@/middleware/upload';
+import { uploadInstagramReelVideo, uploadSingle } from '@/middleware/upload';
 import { ApiError } from '@/shared/api-response';
 import { paramString } from '@/utils/params';
 import { publicCache } from '@/middleware/cache';
@@ -55,9 +55,16 @@ router.post(
   '/reels',
   authenticateAdmin,
   loadAdmin,
-  validateBody(createInstagramReelSchema),
+  uploadInstagramReelVideo,
   asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
-    const reel = await instagramService.createReel(req.body);
+    if (!req.file) throw new ApiError(400, 'Video file is required');
+
+    const parsed = createInstagramReelFieldsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new ApiError(400, parsed.error.errors[0]?.message || 'Invalid Instagram video data');
+    }
+
+    const reel = await instagramService.createReel(parsed.data, req.file);
     invalidateInstagramCaches();
     sendSuccess(res, reel, 'Instagram video added', 201);
   }),
@@ -80,9 +87,18 @@ router.put(
   authenticateAdmin,
   loadAdmin,
   validateParams(idParamSchema),
-  validateBody(updateInstagramReelSchema),
+  uploadInstagramReelVideo,
   asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
-    const reel = await instagramService.updateReel(paramString(req.params.id), req.body);
+    const parsed = updateInstagramReelFieldsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new ApiError(400, parsed.error.errors[0]?.message || 'Invalid Instagram video data');
+    }
+
+    const reel = await instagramService.updateReel(
+      paramString(req.params.id),
+      parsed.data,
+      req.file,
+    );
     invalidateInstagramCaches();
     sendSuccess(res, reel, 'Instagram video updated');
   }),
@@ -94,7 +110,7 @@ router.delete(
   loadAdmin,
   validateParams(idParamSchema),
   asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
-    await instagramService.softDeleteReel(paramString(req.params.id));
+    await instagramService.deleteReel(paramString(req.params.id));
     invalidateInstagramCaches();
     sendSuccess(res, null, 'Instagram video deleted');
   }),

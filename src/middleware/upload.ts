@@ -34,3 +34,31 @@ export const uploadAdminProductSave = multer({
     files: 36,
   },
 }).any();
+
+const videoFilter: multer.Options['fileFilter'] = (_req, file, cb) => {
+  const allowed = [
+    'video/mp4',
+    'video/webm',
+    'video/quicktime',
+    'video/x-m4v',
+    'video/x-msvideo',
+  ];
+  if (allowed.includes(file.mimetype) || /\.(mp4|webm|mov|m4v|avi)$/i.test(file.originalname)) {
+    cb(null, true);
+  } else {
+    cb(
+      new ApiError(400, 'Only MP4, WebM, or MOV videos are allowed') as unknown as null,
+      false,
+    );
+  }
+};
+
+/** Homepage Instagram reel upload (converted/compressed server-side). */
+export const uploadInstagramReelVideo = multer({
+  storage,
+  fileFilter: videoFilter,
+  limits: {
+    fileSize: 40 * 1024 * 1024,
+    files: 1,
+  },
+}).single('video');

@@ -1,7 +1,10 @@
 import { randomUUID } from 'crypto';
 import { promises as fs } from 'fs';
+import { spawn } from 'child_process';
+import os from 'os';
 import path from 'path';
 import sharp from 'sharp';
+import ffmpegStatic from 'ffmpeg-static';
 import { apiBaseUrl } from '@/config/env';
 import { ApiError } from '@/shared/api-response';
 import { logger } from '@/utils/logger';
@@ -18,8 +21,17 @@ export interface StoredImage {
   height: number;
 }
 
+export interface StoredVideo {
+  url: string;
+  publicId: string;
+  byteSize: number;
+}
+
 /** All WebP output is compressed at this quality. */
 const WEBP_QUALITY = 80;
+
+/** Target max bytes after conversion (~8 MB). */
+const MAX_REEL_OUTPUT_BYTES = 8 * 1024 * 1024;
 
 /** Public URL prefix images are served under (see express.static in app.ts). */
 const PUBLIC_PREFIX = '/uploads';
@@ -37,6 +49,7 @@ const CATEGORY_MAX_WIDTH: Record<string, number> = {
   categories: 800,
   testimonials: 600,
   instagram: 1080,
+  'instagram-reels': 1080,
   marketing: 1080,
   'our-story': 1400,
   'invoice-signature': 600,
@@ -120,6 +133,120 @@ export class LocalStorageService {
     folder: string,
   ): Promise<StoredImage[]> {
     return Promise.all(files.map((file) => this.uploadImage(file.buffer, folder)));
+  }
+
+  /**
+   * Convert uploaded video to H.264 MP4 (max ~720p), compress, and store under
+   * uploads/instagram-reels/. Falls back to storing original MP4/WebM if ffmpeg fails.
+   */
+  async uploadVideo(buffer: Buffer, originalMime?: string): Promise<StoredVideo> {
+    const category = 'instagram-reels';
+    const dir = path.join(UPLOADS_DIR, category);
+    await fs.mkdir(dir, { recursive: true });
+
+    let output: Buffer;
+    try {
+      output = await this.convertVideoToMp4(buffer);
+    } catch (error) {
+      logger.warn('ffmpeg convert failed; storing original if already web-friendly', {
+        error: error instanceof Error ? error.message : error,
+      });
+      const mime = (originalMime || '').toLowerCase();
+      if (mime.includes('mp4') || mime.includes('webm')) {
+        output = buffer;
+      } else {
+        throw new ApiError(
+          400,
+          'Could not convert video. Upload MP4 or WebM, or install ffmpeg on the server.',
+        );
+      }
+    }
+
+    if (output.byteLength > MAX_REEL_OUTPUT_BYTES) {
+      throw new ApiError(
+        400,
+        'Video is still too large after compression (max 8 MB). Use a shorter clip.',
+      );
+    }
+
+    const ext = originalMime?.includes('webm') && output === buffer ? 'webm' : 'mp4';
+    const filename = `${randomUUID()}.${ext}`;
+    const absolutePath = path.join(dir, filename);
+    await fs.writeFile(absolutePath, output);
+
+    const relativePath = `${PUBLIC_PREFIX}/${category}/${filename}`;
+    return {
+      url: relativePath,
+      publicId: relativePath,
+      byteSize: output.byteLength,
+    };
+  }
+
+  private async convertVideoToMp4(input: Buffer): Promise<Buffer> {
+    const ffmpegPath = typeof ffmpegStatic === 'string' ? ffmpegStatic : null;
+    if (!ffmpegPath) {
+      throw new Error('ffmpeg-static binary not available');
+    }
+
+    const id = randomUUID();
+    const tmpIn = path.join(os.tmpdir(), `ig-reel-${id}-in`);
+    const tmpOut = path.join(os.tmpdir(), `ig-reel-${id}.mp4`);
+
+    await fs.writeFile(tmpIn, input);
+
+    try {
+      await this.runFfmpeg(ffmpegPath, [
+        '-y',
+        '-i',
+        tmpIn,
+        '-vf',
+        "scale='min(720,iw)':-2",
+        '-c:v',
+        'libx264',
+        '-preset',
+        'fast',
+        '-crf',
+        '28',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '96k',
+        '-ac',
+        '2',
+        '-movflags',
+        '+faststart',
+        '-pix_fmt',
+        'yuv420p',
+        '-t',
+        '90',
+        tmpOut,
+      ]);
+
+      const output = await fs.readFile(tmpOut);
+      if (!output.byteLength) throw new Error('ffmpeg produced empty file');
+      return output;
+    } finally {
+      await Promise.all([
+        fs.unlink(tmpIn).catch(() => undefined),
+        fs.unlink(tmpOut).catch(() => undefined),
+      ]);
+    }
+  }
+
+  private runFfmpeg(bin: string, args: string[]): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const proc = spawn(bin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+      let stderr = '';
+      proc.stderr?.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString();
+        if (stderr.length > 4000) stderr = stderr.slice(-4000);
+      });
+      proc.on('error', (error) => reject(error));
+      proc.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`ffmpeg exited ${code}: ${stderr.slice(-500)}`));
+      });
+    });
   }
 
   /** Best-effort removal of a single stored image. Missing files are ignored. */

@@ -1,19 +1,7 @@
 import { prisma } from '@/config/database';
 import { ApiError } from '@/shared/api-response';
 import { localStorageService } from '@/integrations/local-storage.service';
-import { MAX_INSTAGRAM_REELS } from './instagram.schema';
-
-/** Canonical permalink Instagram embed.js expects. */
-export function normalizeInstagramPermalink(raw: string): string {
-  const url = new URL(raw.trim());
-  let path = url.pathname.replace(/\/+$/, '');
-  // Prefer /reel/ over /reels/ for embed.js
-  path = path.replace(/^\/reels\//i, '/reel/');
-  // /share/reel/CODE → /reel/CODE when possible
-  path = path.replace(/^\/share\/(reel|reels|p|tv)\//i, '/$1/').replace(/^\/reels\//i, '/reel/');
-  if (!path.endsWith('/')) path += '/';
-  return `https://www.instagram.com${path}`;
-}
+import { MAX_INSTAGRAM_REELS, normalizeInstagramLink } from './instagram.schema';
 
 export class InstagramService {
   async findActive() {
@@ -67,6 +55,7 @@ export class InstagramService {
       select: {
         id: true,
         videoUrl: true,
+        instagramUrl: true,
         sortOrder: true,
       },
     });
@@ -79,62 +68,103 @@ export class InstagramService {
     });
   }
 
-  async createReel(data: { videoUrl: string; sortOrder?: number; isActive?: boolean }) {
-    const videoUrl = normalizeInstagramPermalink(data.videoUrl);
+  async createReel(
+    data: { instagramUrl: string; sortOrder?: number; isActive?: boolean },
+    file: Express.Multer.File,
+  ) {
+    const instagramUrl = normalizeInstagramLink(data.instagramUrl);
+    if (!instagramUrl) throw new ApiError(400, 'Invalid Instagram link');
 
-    return prisma.$transaction(async (tx) => {
-      const activeCount = await tx.instagramReel.count({
-        where: { deletedAt: null },
-      });
+    const upload = await localStorageService.uploadVideo(file.buffer, file.mimetype);
+    const filesToDelete: string[] = [];
 
-      // Cap at 10: remove the oldest (not the new one).
-      if (activeCount >= MAX_INSTAGRAM_REELS) {
-        const oldest = await tx.instagramReel.findFirst({
+    try {
+      const created = await prisma.$transaction(async (tx) => {
+        const active = await tx.instagramReel.findMany({
           where: { deletedAt: null },
           orderBy: [{ createdAt: 'asc' }, { sortOrder: 'asc' }],
-          select: { id: true },
+          select: { id: true, publicId: true },
         });
-        if (oldest) {
-          await tx.instagramReel.update({
-            where: { id: oldest.id },
-            data: { deletedAt: new Date(), isActive: false },
-          });
+
+        if (active.length >= MAX_INSTAGRAM_REELS) {
+          const overflow = active.length - MAX_INSTAGRAM_REELS + 1;
+          for (let i = 0; i < overflow; i += 1) {
+            const oldest = active[i];
+            if (!oldest) break;
+            await tx.instagramReel.delete({ where: { id: oldest.id } });
+            filesToDelete.push(oldest.publicId);
+          }
         }
-      }
 
-      const maxSort = await tx.instagramReel.aggregate({
-        where: { deletedAt: null },
-        _max: { sortOrder: true },
+        const maxSort = await tx.instagramReel.aggregate({
+          where: { deletedAt: null },
+          _max: { sortOrder: true },
+        });
+
+        return tx.instagramReel.create({
+          data: {
+            videoUrl: upload.url,
+            publicId: upload.publicId,
+            instagramUrl,
+            sortOrder:
+              data.sortOrder ?? (maxSort._max.sortOrder == null ? 0 : maxSort._max.sortOrder + 1),
+            isActive: data.isActive ?? true,
+          },
+        });
       });
 
-      return tx.instagramReel.create({
-        data: {
-          videoUrl,
-          sortOrder:
-            data.sortOrder ?? (maxSort._max.sortOrder == null ? 0 : maxSort._max.sortOrder + 1),
-          isActive: data.isActive ?? true,
-        },
-      });
-    });
+      await localStorageService.deleteMultiple(filesToDelete);
+      return created;
+    } catch (error) {
+      await localStorageService.deleteImage(upload.publicId);
+      throw error;
+    }
   }
 
   async updateReel(
     id: string,
-    data: { videoUrl?: string; sortOrder?: number; isActive?: boolean },
+    data: { instagramUrl?: string; sortOrder?: number; isActive?: boolean },
+    file?: Express.Multer.File,
   ) {
     const reel = await prisma.instagramReel.findFirst({ where: { id, deletedAt: null } });
     if (!reel) throw new ApiError(404, 'Instagram video not found');
 
-    return prisma.instagramReel.update({
-      where: { id },
-      data: {
-        ...(data.videoUrl !== undefined
-          ? { videoUrl: normalizeInstagramPermalink(data.videoUrl) }
-          : {}),
-        ...(data.sortOrder !== undefined ? { sortOrder: data.sortOrder } : {}),
-        ...(data.isActive !== undefined ? { isActive: data.isActive } : {}),
-      },
-    });
+    let upload: { url: string; publicId: string } | null = null;
+    if (file) {
+      upload = await localStorageService.uploadVideo(file.buffer, file.mimetype);
+    }
+
+    let nextInstagramUrl: string | undefined;
+    if (data.instagramUrl !== undefined) {
+      const normalized = normalizeInstagramLink(data.instagramUrl);
+      if (!normalized) {
+        if (upload) await localStorageService.deleteImage(upload.publicId);
+        throw new ApiError(400, 'Invalid Instagram link');
+      }
+      nextInstagramUrl = normalized;
+    }
+
+    try {
+      const updated = await prisma.instagramReel.update({
+        where: { id },
+        data: {
+          ...(upload
+            ? { videoUrl: upload.url, publicId: upload.publicId }
+            : {}),
+          ...(nextInstagramUrl !== undefined ? { instagramUrl: nextInstagramUrl } : {}),
+          ...(data.sortOrder !== undefined ? { sortOrder: data.sortOrder } : {}),
+          ...(data.isActive !== undefined ? { isActive: data.isActive } : {}),
+        },
+      });
+
+      if (upload) {
+        await localStorageService.deleteImage(reel.publicId);
+      }
+      return updated;
+    } catch (error) {
+      if (upload) await localStorageService.deleteImage(upload.publicId);
+      throw error;
+    }
   }
 
   async reorderReels(orderedIds: string[]) {
@@ -158,13 +188,11 @@ export class InstagramService {
     return this.findAllReels();
   }
 
-  async softDeleteReel(id: string) {
+  async deleteReel(id: string) {
     const reel = await prisma.instagramReel.findFirst({ where: { id, deletedAt: null } });
     if (!reel) throw new ApiError(404, 'Instagram video not found');
-    await prisma.instagramReel.update({
-      where: { id },
-      data: { deletedAt: new Date(), isActive: false },
-    });
+    await prisma.instagramReel.delete({ where: { id } });
+    await localStorageService.deleteImage(reel.publicId);
   }
 }
 
