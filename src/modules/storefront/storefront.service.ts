@@ -2,6 +2,7 @@ import { categoryService } from '@/modules/categories/category.service';
 import { productService } from '@/modules/products/product.service';
 import { heroBannerService } from '@/modules/hero-banners/hero-banner.service';
 import { settingsService } from '@/modules/settings/settings.service';
+import { instagramService } from '@/modules/instagram/instagram.service';
 import { STORE_CACHE_TTL_MS, withCache } from '@/utils/memory-cache';
 import { logger } from '@/utils/logger';
 
@@ -19,7 +20,7 @@ async function settle<T>(label: string, loader: () => Promise<T>, fallback: T): 
 export class StorefrontService {
   async getHomepage() {
     return withCache('storefront:homepage', STORE_CACHE_TTL_MS, async () => {
-      const [banners, categories, productsResult, settings] = await Promise.all([
+      const [banners, categories, productsResult, settings, instagramReels] = await Promise.all([
         settle('banners', () => heroBannerService.findActive(), []),
         settle('categories', () => categoryService.findAll(true), []),
         settle(
@@ -33,6 +34,7 @@ export class StorefrontService {
           { products: [], meta: { page: 1, limit: 10, total: 0, totalPages: 0, hasNext: false, hasPrev: false } },
         ),
         settle('settings', () => settingsService.getPublicSettings(), {} as Record<string, unknown>),
+        settle('instagramReels', () => instagramService.findActiveReels(), []),
       ]);
 
       return {
@@ -40,6 +42,7 @@ export class StorefrontService {
         categories,
         products: productsResult.products,
         settings,
+        instagramReels,
       };
     });
   }

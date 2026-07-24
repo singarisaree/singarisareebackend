@@ -2988,6 +2988,31 @@ export class OrderService {
     );
   }
 
+  /**
+   * Customer closed Razorpay without initiating a payment attempt (back / dismiss).
+   * Soft-delete the unpaid pending order so it is hidden from My Orders and admin.
+   */
+  async abandonPendingCheckout(orderNumber: string): Promise<{ abandoned: boolean }> {
+    const order = await prisma.order.findFirst({
+      where: { orderNumber, deletedAt: null },
+      include: { payments: { select: { status: true } } },
+    });
+    if (!order) return { abandoned: false };
+    if (order.status !== 'PAYMENT_PENDING') return { abandoned: false };
+    if (order.payments.some((payment) => payment.status === 'SUCCESS')) {
+      return { abandoned: false };
+    }
+
+    await this.releasePendingOrder(
+      order.id,
+      'Payment cancelled before completion. Customer can place the order again from checkout.',
+    );
+    invalidateCache('product:');
+    invalidateCache('products:');
+    invalidateCache('storefront:');
+    return { abandoned: true };
+  }
+
   private async releasePendingOrder(orderId: string, reason: string) {
     try {
       await runPrismaTransaction(async (tx) => {
@@ -3023,15 +3048,20 @@ export class OrderService {
           await this.restoreCouponFromOrder(tx, order.couponId, Number(order.discountAmount));
         }
 
+        // Soft-delete so abandoned checkouts don't clutter admin as fake failed orders.
         await tx.order.update({
           where: { id: orderId },
-          data: { status: 'FAILED' },
+          data: {
+            status: 'CANCELLED',
+            deletedAt: new Date(),
+            notes: reason,
+          },
         });
 
         await tx.trackingHistory.create({
           data: {
             orderId,
-            status: 'FAILED',
+            status: 'CANCELLED',
             description: reason,
           },
         });

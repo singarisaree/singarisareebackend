@@ -42,8 +42,6 @@ export class MarketingService {
     adminId?: string,
   ) {
     const imageUrl = data.imageUrl?.trim() || undefined;
-    // WhatsApp Cloud API fetches header media over HTTP, so it needs an absolute URL.
-    const mediaUrl = toPublicImageUrl(imageUrl) || undefined;
     const templateConfig = await whatsAppService.getMarketingTemplateConfig(Boolean(imageUrl));
     if (!whatsAppService.isConfigured() || !templateConfig.name) {
       throw new ApiError(
@@ -52,6 +50,25 @@ export class MarketingService {
           ? 'WhatsApp Cloud API image marketing template is not configured'
           : 'WhatsApp Cloud API marketing template is not configured',
       );
+    }
+
+    // WhatsApp rejects WebP header images and often fails on non-public image links.
+    // Convert + upload once per campaign, then send with Meta media id.
+    let imageId: string | undefined;
+    if (imageUrl) {
+      const storedPath = imageUrl.replace(/^https?:\/\/[^/]+/i, '');
+      const relativePath = storedPath.startsWith('/uploads/')
+        ? storedPath
+        : imageUrl.startsWith('/uploads/')
+          ? imageUrl
+          : null;
+      if (!relativePath) {
+        throw new ApiError(
+          400,
+          'Marketing image must be an uploaded site image. Re-upload the image and try again.',
+        );
+      }
+      imageId = await whatsAppService.uploadMarketingImageMedia(relativePath);
     }
 
     let recipients;
@@ -98,7 +115,7 @@ export class MarketingService {
         heading: data.heading,
         story: data.story,
         campaignLink: data.campaignLink,
-        mediaUrl,
+        imageId,
         templateConfig,
       });
 
@@ -160,12 +177,42 @@ export class MarketingService {
   }
 
   async getCampaignHistory(limit = 20) {
-    return prisma.marketingCampaign.findMany({
+    const campaigns = await prisma.marketingCampaign.findMany({
       orderBy: { createdAt: 'desc' },
       take: limit,
       include: {
         createdByAdmin: { select: { name: true } },
+        logs: {
+          select: {
+            status: true,
+            deliveredAt: true,
+            failedAt: true,
+            errorMessage: true,
+          },
+        },
       },
+    });
+
+    return campaigns.map((campaign) => {
+      const deliveredCount = campaign.logs.filter((log) => log.deliveredAt != null).length;
+      const failedAfterAccept = campaign.logs.filter((log) => log.failedAt != null).length;
+      const recentErrors = [
+        ...new Set(
+          campaign.logs
+            .map((log) => log.errorMessage?.trim())
+            .filter((message): message is string => Boolean(message)),
+        ),
+      ].slice(0, 3);
+
+      const { logs: _logs, ...rest } = campaign;
+      return {
+        ...rest,
+        /** Meta accepted the send API (not the same as delivered to the phone). */
+        acceptedCount: campaign.sentCount,
+        deliveredCount,
+        failedAfterAccept,
+        recentErrors,
+      };
     });
   }
 }

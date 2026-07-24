@@ -26,6 +26,11 @@ const verifyPaymentSchema = z.object({
   razorpaySignature: z.string().min(1),
 });
 
+const reportPaymentFailedSchema = z.object({
+  orderNumber: z.string().min(1),
+  reason: z.string().max(500).optional(),
+});
+
 const router = Router();
 
 router.post(
@@ -103,6 +108,21 @@ router.post(
     }
 
     res.status(200).json({ success: true });
+  }),
+);
+
+/** Client reports Razorpay payment.failed (transaction was attempted). */
+router.post(
+  '/failed',
+  asyncHandler(async (req: Request, res: Response) => {
+    const parsed = reportPaymentFailedSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, message: 'Invalid payment failure payload' });
+      return;
+    }
+
+    await orderService.handlePaymentFailure(parsed.data.orderNumber, parsed.data.reason);
+    sendSuccess(res, { orderNumber: parsed.data.orderNumber, paymentStatus: 'FAILED' }, 'Payment marked failed');
   }),
 );
 

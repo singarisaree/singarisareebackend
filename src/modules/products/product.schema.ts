@@ -12,8 +12,35 @@ export const createCategorySchema = z.object({
 
 export const updateCategorySchema = createCategorySchema.partial();
 
+/** Optional. Empty / null clears the link; otherwise must be an Instagram URL. */
+const instagramVideoUrlSchema = z
+  .union([
+    z.null(),
+    z.literal(''),
+    z
+      .string()
+      .trim()
+      .max(500)
+      .refine(
+        (value) => {
+          try {
+            const url = new URL(value);
+            return /(^|\.)instagram\.com$/i.test(url.hostname);
+          } catch {
+            return false;
+          }
+        },
+        { message: 'Enter a valid Instagram video/reel URL' },
+      ),
+  ])
+  .optional();
+
 export const createProductSchema = z.object({
   name: z.string().min(2).max(200),
+  sku: z
+    .string()
+    .trim()
+    .regex(/^\d{6}$/, 'SKU must be exactly 6 digits'),
   categoryId: z.string().uuid(),
   description: z.string().min(10),
   productDetails: z.string().max(5000).optional(),
@@ -41,6 +68,7 @@ export const createProductSchema = z.object({
       z.object({
         name: z.string().min(1),
         hexCode: z.string().optional(),
+        instagramVideoUrl: instagramVideoUrlSchema,
         sortOrder: z.number().int().optional(),
         stock: z.number().int().min(0).default(0),
       }),
@@ -55,6 +83,7 @@ export const adminSaveColorSchema = z.object({
   id: z.string().uuid(),
   name: z.string().min(1).optional(),
   hexCode: z.string().optional(),
+  instagramVideoUrl: instagramVideoUrlSchema,
   isActive: z.boolean().optional(),
   availableStock: z.number().int().min(0).optional(),
   deleteImageIds: z.array(z.string().uuid()).max(6).optional(),
@@ -80,6 +109,7 @@ export const updateBaseSoldCountSchema = z.object({
 export const addColorSchema = z.object({
   name: z.string().min(1),
   hexCode: z.string().optional(),
+  instagramVideoUrl: instagramVideoUrlSchema,
   sortOrder: z.number().int().optional(),
   stock: z.number().int().min(0).default(0),
   isActive: z.boolean().optional(),
@@ -94,6 +124,7 @@ export const adminAddColorSchema = addColorSchema;
 export const updateColorSchema = z.object({
   name: z.string().min(1).optional(),
   hexCode: z.string().optional(),
+  instagramVideoUrl: instagramVideoUrlSchema,
   sortOrder: z.number().int().optional(),
   isActive: z.boolean().optional(),
 });

@@ -27,7 +27,7 @@ async function main() {
     { key: 'store_email', value: 'singarisaree@gmail.com', group: 'contact' },
     { key: 'store_phone', value: '+91 94904 58789', group: 'contact' },
     { key: 'store_address', value: 'Flat No. 306, Floor 3, Sumadhura Prestige Apartments, Doctors Colony, Road No. 6, Hyderabad - 500035', group: 'contact' },
-    { key: 'instagram_url', value: 'https://instagram.com/singarisarees', group: 'social' },
+    { key: 'instagram_url', value: 'https://www.instagram.com/sareeby_singari?utm_source=ig_web_button_share_sheet&igsh=ZDNlZDc0MzIxNw==', group: 'social' },
     { key: 'facebook_url', value: 'https://facebook.com/singarisarees', group: 'social' },
     { key: 'whatsapp_number', value: '+919490458789', group: 'social' },
     { key: 'default_shipping_charge', value: 99, group: 'shipping' },

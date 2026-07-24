@@ -307,7 +307,7 @@ const WHATSAPP_TEMPLATE_DEFAULTS: Record<WhatsAppTemplateKind, WhatsAppTemplateR
   customer_login_otp: {
     kind: 'customer_login_otp',
     name: 'singari_customer_login_otp',
-    language: 'en',
+    language: 'en_US',
     category: 'AUTHENTICATION',
     headerText: '',
     // Preview copy for Admin; Meta AUTHENTICATION templates use a fixed OTP layout.

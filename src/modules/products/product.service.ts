@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma, PRISMA_TX_OPTIONS } from '@/config/database';
 import { ApiError } from '@/shared/api-response';
-import { slugify, generateUniqueSku, parsePagination, parseCreatedAtFilter, randomBaseSoldCount } from '@/utils/helpers';
+import { slugify, parsePagination, parseCreatedAtFilter, randomBaseSoldCount } from '@/utils/helpers';
 import { buildPaginationMeta } from '@/shared/api-response';
 import { localStorageService } from '@/integrations/local-storage.service';
 import { STORE_CACHE_TTL_MS, ADMIN_LIST_CACHE_TTL_MS, withCache, invalidateCache } from '@/utils/memory-cache';
@@ -125,14 +125,18 @@ const storefrontProductInclude = {
 };
 
 export class ProductService {
-  private async allocateSku(): Promise<string> {
-    return generateUniqueSku(async (sku) => {
-      const existing = await prisma.product.findUnique({
-        where: { sku },
-        select: { id: true },
-      });
-      return !!existing;
+  /** Throws if SKU is already used by another product. */
+  private async assertSkuAvailable(sku: string, excludeProductId?: string) {
+    const existing = await prisma.product.findFirst({
+      where: {
+        sku,
+        ...(excludeProductId ? { id: { not: excludeProductId } } : {}),
+      },
+      select: { id: true },
     });
+    if (existing) {
+      throw new ApiError(409, 'SKU already exists. Please use a different 6-digit SKU.');
+    }
   }
 
   private buildListWhere(
@@ -413,11 +417,18 @@ export class ProductService {
 
   async create(data: {
     name: string;
+    sku: string;
     categoryId: string;
     description: string;
     price: number;
     mrp: number;
-    colors: Array<{ name: string; hexCode?: string; sortOrder?: number; stock: number }>;
+    colors: Array<{
+      name: string;
+      hexCode?: string;
+      instagramVideoUrl?: string;
+      sortOrder?: number;
+      stock: number;
+    }>;
     [key: string]: unknown;
   }) {
     const category = await prisma.category.findFirst({
@@ -425,10 +436,12 @@ export class ProductService {
     });
     if (!category) throw new ApiError(404, 'Category not found');
 
+    const sku = data.sku.trim();
+    await this.assertSkuAvailable(sku);
+
     const slug = slugify(data.name);
     const existingSlug = await prisma.product.findFirst({ where: { slug } });
     const finalSlug = existingSlug ? `${slug}-${Date.now()}` : slug;
-    const sku = await this.allocateSku();
 
     const { colors, ...productData } = data;
 
@@ -471,6 +484,7 @@ export class ProductService {
             productId: created.id,
             name: color.name,
             hexCode: color.hexCode,
+            instagramVideoUrl: color.instagramVideoUrl?.trim() || null,
             sortOrder: color.sortOrder ?? index,
           },
         });
@@ -528,10 +542,12 @@ export class ProductService {
     });
     if (!category) throw new ApiError(404, 'Category not found');
 
+    const sku = data.sku.trim();
+    await this.assertSkuAvailable(sku);
+
     const slug = slugify(data.name);
     const existingSlug = await prisma.product.findFirst({ where: { slug } });
     const finalSlug = existingSlug ? `${slug}-${Date.now()}` : slug;
-    const sku = await this.allocateSku();
 
     const uploadedPublicIds: string[] = [];
     const uploadsByIndex = new Map<number, Array<{ url: string; publicId: string }>>();
@@ -593,6 +609,7 @@ export class ProductService {
               productId: created.id,
               name: color.name,
               hexCode: color.hexCode,
+              instagramVideoUrl: color.instagramVideoUrl?.trim() || null,
               sortOrder: color.sortOrder ?? index,
             },
           });
@@ -642,6 +659,12 @@ export class ProductService {
       if (!category) throw new ApiError(404, 'Category not found');
     }
 
+    if (typeof data.sku === 'string') {
+      const sku = data.sku.trim();
+      data.sku = sku;
+      await this.assertSkuAvailable(sku, id);
+    }
+
     if (data.name) {
       const slug = slugify(data.name as string);
       const existing = await prisma.product.findFirst({
@@ -682,6 +705,11 @@ export class ProductService {
       });
       if (!category) throw new ApiError(404, 'Category not found');
     }
+    if (typeof productData.sku === 'string') {
+      const sku = productData.sku.trim();
+      productData.sku = sku;
+      await this.assertSkuAvailable(sku, productId);
+    }
     if (productData.name) {
       const slug = slugify(productData.name as string);
       const existing = await prisma.product.findFirst({
@@ -706,6 +734,7 @@ export class ProductService {
       id: string;
       name?: string;
       hexCode?: string;
+      instagramVideoUrl?: string | null;
       isActive?: boolean;
       availableStock?: number;
       deleteImageIds: string[];
@@ -779,6 +808,12 @@ export class ProductService {
           id: colorPayload.id,
           name: colorPayload.name,
           hexCode: colorPayload.hexCode,
+          instagramVideoUrl:
+            colorPayload.instagramVideoUrl !== undefined
+              ? typeof colorPayload.instagramVideoUrl === 'string'
+                ? colorPayload.instagramVideoUrl.trim() || null
+                : null
+              : undefined,
           isActive: colorPayload.isActive,
           availableStock: colorPayload.availableStock,
           deleteImageIds,
@@ -829,6 +864,9 @@ export class ProductService {
           const colorUpdate: Prisma.ProductColorUpdateInput = {};
           if (colorSave.name !== undefined) colorUpdate.name = colorSave.name;
           if (colorSave.hexCode !== undefined) colorUpdate.hexCode = colorSave.hexCode;
+          if (colorSave.instagramVideoUrl !== undefined) {
+            colorUpdate.instagramVideoUrl = colorSave.instagramVideoUrl;
+          }
           if (colorSave.isActive !== undefined) colorUpdate.isActive = colorSave.isActive;
           if (Object.keys(colorUpdate).length > 0) {
             await tx.productColor.update({
@@ -1005,7 +1043,14 @@ export class ProductService {
 
   async addColor(
     productId: string,
-    data: { name: string; hexCode?: string; sortOrder?: number; stock: number; isActive?: boolean },
+    data: {
+      name: string;
+      hexCode?: string;
+      instagramVideoUrl?: string;
+      sortOrder?: number;
+      stock: number;
+      isActive?: boolean;
+    },
   ) {
     await this.findById(productId);
 
@@ -1020,6 +1065,7 @@ export class ProductService {
           productId,
           name: data.name,
           hexCode: data.hexCode,
+          instagramVideoUrl: data.instagramVideoUrl?.trim() || null,
           sortOrder: data.sortOrder ?? (maxSort._max.sortOrder ?? -1) + 1,
           isActive: data.isActive ?? true,
         },
@@ -1077,6 +1123,7 @@ export class ProductService {
             productId,
             name: data.name,
             hexCode: data.hexCode,
+            instagramVideoUrl: data.instagramVideoUrl?.trim() || null,
             sortOrder: data.sortOrder ?? (maxSort._max.sortOrder ?? -1) + 1,
             isActive: data.isActive ?? true,
           },
@@ -1119,16 +1166,27 @@ export class ProductService {
 
   async updateColor(
     colorId: string,
-    data: { name?: string; hexCode?: string; sortOrder?: number; isActive?: boolean },
+    data: {
+      name?: string;
+      hexCode?: string;
+      instagramVideoUrl?: string;
+      sortOrder?: number;
+      isActive?: boolean;
+    },
   ) {
     const color = await prisma.productColor.findFirst({
       where: { id: colorId, deletedAt: null },
     });
     if (!color) throw new ApiError(404, 'Color not found');
 
+    const updateData: Prisma.ProductColorUpdateInput = { ...data };
+    if (data.instagramVideoUrl !== undefined) {
+      updateData.instagramVideoUrl = data.instagramVideoUrl.trim() || null;
+    }
+
     await prisma.productColor.update({
       where: { id: colorId },
-      data,
+      data: updateData,
     });
 
     invalidateStorefrontProductCaches();

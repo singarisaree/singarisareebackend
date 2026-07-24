@@ -86,7 +86,7 @@ function renderEmail(content: Omit<CampaignContent, 'templateKey'>, customerName
           <p style="margin:24px 0 0;color:#8a7a6b;font-size:13px;line-height:1.6;">With warmth,<br/>The Singari Sarees team</p>
         </td></tr>
         <tr><td style="padding:18px 30px 24px;border-top:1px solid #efe8dc;">
-          <p style="margin:0;color:#a09386;font-size:11px;line-height:1.5;">You are receiving this promotional email because marketing updates are enabled for your Singari Sarees customer profile.</p>
+          <p style="margin:0;color:#a09386;font-size:11px;line-height:1.5;">You are receiving this promotional email because marketing updates are enabled for your Singari Sarees customer profile. To unsubscribe, reply with “Unsubscribe”.</p>
         </td></tr>
       </table>
     </td></tr>
@@ -233,6 +233,7 @@ class EmailMarketingService {
           subject: rendered.subject,
           html: rendered.html,
           text: rendered.text,
+          isMarketing: true,
         });
 
         if (sent) sentCount += 1;

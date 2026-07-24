@@ -23,6 +23,9 @@ type OrderEmailPayload = {
   items: OrderEmailItem[];
   trackingUrl?: string | null;
   estimatedDelivery?: string | null;
+  refundCouponCode?: string | null;
+  refundAmount?: string | null;
+  refundDeduction?: string | null;
   myOrdersUrl: string;
 };
 
@@ -129,16 +132,16 @@ function statusCopy(status: OrderStatus): {
       return {
         eyebrow: 'Cancelled',
         headline: 'Your order was cancelled',
-        body: 'This order has been cancelled. If a payment was taken, refunds (if applicable) follow your payment method timeline.',
+        body: 'This order has been cancelled. If payment was collected, any store credit will be shared separately as a coupon linked to your mobile number.',
         subject: 'Order cancelled · Singari Sarees',
         ctaLabel: 'View order',
       };
     case 'REFUNDED':
       return {
-        eyebrow: 'Refunded',
-        headline: 'Your refund has been processed',
-        body: 'We have processed a refund for this order. Bank timelines can take a few business days to show the credit.',
-        subject: 'Refund processed · Singari Sarees',
+        eyebrow: 'Store credit',
+        headline: 'Your store credit coupon is ready',
+        body: 'We have issued a store credit coupon for this order. Use the coupon code below on your next order with the same mobile number.',
+        subject: 'Store credit coupon issued · Singari Sarees',
         ctaLabel: 'View order',
       };
     case 'RTO':
@@ -153,7 +156,7 @@ function statusCopy(status: OrderStatus): {
       return {
         eyebrow: 'Return received',
         headline: 'We’ve received your return',
-        body: 'Your return has been recorded. We will update you once inspection and any refund steps are complete.',
+        body: 'Your return has been recorded. If store credit applies, we will send a separate email with your coupon code.',
         subject: 'Return received · Singari Sarees',
         ctaLabel: 'View order',
       };
@@ -176,10 +179,54 @@ function statusCopy(status: OrderStatus): {
   }
 }
 
+/** Statuses where delivery ETA is relevant. */
+const STATUSES_WITH_ETA = new Set<OrderStatus>([
+  'PLACED',
+  'PAYMENT_PENDING',
+  'CONFIRMED',
+  'READY_TO_SHIP',
+  'SHIPPED',
+  'IN_TRANSIT',
+]);
+
+/** Statuses where courier tracking belongs in the email. */
+const STATUSES_WITH_TRACKING = new Set<OrderStatus>([
+  'SHIPPED',
+  'IN_TRANSIT',
+  'DELIVERED',
+  'RTO',
+]);
+
+/** Statuses where the full item/price table is useful. */
+const STATUSES_WITH_ITEMS = new Set<OrderStatus>([
+  'PLACED',
+  'PAYMENT_PENDING',
+  'CONFIRMED',
+  'READY_TO_SHIP',
+  'SHIPPED',
+  'IN_TRANSIT',
+  'DELIVERED',
+  'FAILED',
+]);
+
+function footerCopy(status: OrderStatus): string {
+  if (status === 'REFUNDED') {
+    return 'You’re receiving this because a store credit coupon was issued for your Singari Sarees order. Questions? Just reply to this email.';
+  }
+  if (status === 'CANCELLED' || status === 'FAILED') {
+    return 'You’re receiving this because of an update on your Singari Sarees order. Questions? Just reply to this email.';
+  }
+  return 'You’re receiving this because you placed an order at Singari Sarees. Questions? Just reply to this email.';
+}
+
 function buildEmailHtml(payload: OrderEmailPayload): string {
   const copy = statusCopy(payload.status);
   const name = escapeHtml(payload.customerName.split(' ')[0] || payload.customerName);
   const orderNo = escapeHtml(payload.shortOrderNumber);
+  const showEta = STATUSES_WITH_ETA.has(payload.status) && Boolean(payload.estimatedDelivery);
+  const showTracking = STATUSES_WITH_TRACKING.has(payload.status) && Boolean(payload.trackingUrl);
+  const showItems = STATUSES_WITH_ITEMS.has(payload.status) && payload.items.length > 0;
+
   const itemsHtml = payload.items
     .map(
       (item) => `
@@ -193,13 +240,31 @@ function buildEmailHtml(payload: OrderEmailPayload): string {
     )
     .join('');
 
-  const trackingBlock = payload.trackingUrl
-    ? `<p style="margin:20px 0 0;"><a href="${escapeHtml(payload.trackingUrl)}" style="color:#b8944a;font-weight:600;text-decoration:none;">Track with courier →</a></p>`
+  const trackingBlock = showTracking
+    ? `<p style="margin:20px 0 0;"><a href="${escapeHtml(payload.trackingUrl!)}" style="color:#b8944a;font-weight:600;text-decoration:none;">Track with courier →</a></p>`
     : '';
 
-  const etaBlock = payload.estimatedDelivery
-    ? `<p style="margin:8px 0 0;color:#8a7a6b;font-size:13px;">Estimated delivery: <strong style="color:#3d2f24;">${escapeHtml(payload.estimatedDelivery)}</strong></p>`
+  const etaBlock = showEta
+    ? `<p style="margin:8px 0 0;color:#8a7a6b;font-size:13px;">Estimated delivery: <strong style="color:#3d2f24;">${escapeHtml(payload.estimatedDelivery!)}</strong></p>`
     : '';
+
+  const couponBlock =
+    payload.status === 'REFUNDED' && payload.refundCouponCode
+      ? `<div style="margin:18px 0 0;padding:16px 18px;background:#faf7f2;border-radius:12px;border:1px solid #efe8dc;">
+          <p style="margin:0;color:#8a7a6b;font-size:12px;letter-spacing:0.08em;text-transform:uppercase;">Coupon code</p>
+          <p style="margin:8px 0 0;color:#1c1612;font-size:22px;letter-spacing:0.08em;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:bold;">${escapeHtml(payload.refundCouponCode)}</p>
+          ${
+            payload.refundAmount
+              ? `<p style="margin:10px 0 0;color:#5c4c3f;font-size:14px;">Coupon amount: <strong style="color:#1c1612;">${escapeHtml(payload.refundAmount)}</strong></p>`
+              : ''
+          }
+          ${
+            payload.refundDeduction
+              ? `<p style="margin:6px 0 0;color:#5c4c3f;font-size:14px;">Shipping deduction: <strong style="color:#1c1612;">${escapeHtml(payload.refundDeduction)}</strong></p>`
+              : ''
+          }
+        </div>`
+      : '';
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -230,8 +295,9 @@ function buildEmailHtml(payload: OrderEmailPayload): string {
                 <p style="margin:6px 0 0;color:#1c1612;font-size:20px;letter-spacing:0.04em;">#${orderNo}</p>
                 ${etaBlock}
               </div>
+              ${couponBlock}
               ${
-                payload.items.length
+                showItems
                   ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:8px 0 4px;">
                 <tr>
                   <td style="padding:0 0 8px;color:#8a7a6b;font-size:12px;text-transform:uppercase;letter-spacing:0.08em;">Item</td>
@@ -259,7 +325,7 @@ function buildEmailHtml(payload: OrderEmailPayload): string {
           </tr>
           <tr>
             <td style="padding:18px 28px 24px;border-top:1px solid #efe8dc;">
-              <p style="margin:0;color:#a09386;font-size:11px;line-height:1.5;">You’re receiving this because you placed an order at Singari Sarees. Questions? Just reply to this email.</p>
+              <p style="margin:0;color:#a09386;font-size:11px;line-height:1.5;">${escapeHtml(footerCopy(payload.status))}</p>
             </td>
           </tr>
         </table>
@@ -281,10 +347,21 @@ function buildEmailText(payload: OrderEmailPayload): string {
     copy.body,
     ``,
     `Order #${payload.shortOrderNumber}`,
-    `Total: ${payload.grandTotal}`,
   ];
-  if (payload.estimatedDelivery) lines.push(`Estimated delivery: ${payload.estimatedDelivery}`);
-  if (payload.trackingUrl) lines.push(`Track: ${payload.trackingUrl}`);
+  if (STATUSES_WITH_ITEMS.has(payload.status)) {
+    lines.push(`Total: ${payload.grandTotal}`);
+  }
+  if (STATUSES_WITH_ETA.has(payload.status) && payload.estimatedDelivery) {
+    lines.push(`Estimated delivery: ${payload.estimatedDelivery}`);
+  }
+  if (payload.status === 'REFUNDED' && payload.refundCouponCode) {
+    lines.push(`Coupon code: ${payload.refundCouponCode}`);
+    if (payload.refundAmount) lines.push(`Coupon amount: ${payload.refundAmount}`);
+    if (payload.refundDeduction) lines.push(`Shipping deduction: ${payload.refundDeduction}`);
+  }
+  if (STATUSES_WITH_TRACKING.has(payload.status) && payload.trackingUrl) {
+    lines.push(`Track: ${payload.trackingUrl}`);
+  }
   lines.push(``, `View order: ${payload.myOrdersUrl}`, ``, `— Singari Sarees`);
   return lines.join('\n');
 }
@@ -357,6 +434,9 @@ class OrderEmailService {
         customerEmail: true,
         grandTotal: true,
         estimatedDelivery: true,
+        refundCouponCode: true,
+        refundAmount: true,
+        refundDeduction: true,
         items: {
           select: {
             productName: true,
@@ -376,6 +456,8 @@ class OrderEmailService {
 
     const shortOrderNumber = formatShortOrderNumber(order.orderNumber);
     const copy = statusCopy(status);
+    const deductionValue =
+      order.refundDeduction != null ? Number(order.refundDeduction) : 0;
     const payload: OrderEmailPayload = {
       orderId: order.id,
       orderNumber: order.orderNumber,
@@ -390,8 +472,21 @@ class OrderEmailService {
         quantity: item.quantity,
         price: formatCurrency(Number(item.unitPrice) * item.quantity),
       })),
-      trackingUrl: order.shipping?.trackingUrl,
-      estimatedDelivery: formatDateLabel(order.estimatedDelivery),
+      trackingUrl: STATUSES_WITH_TRACKING.has(status)
+        ? order.shipping?.trackingUrl
+        : null,
+      estimatedDelivery: STATUSES_WITH_ETA.has(status)
+        ? formatDateLabel(order.estimatedDelivery)
+        : null,
+      refundCouponCode: status === 'REFUNDED' ? order.refundCouponCode : null,
+      refundAmount:
+        status === 'REFUNDED' && order.refundAmount != null
+          ? formatCurrency(Number(order.refundAmount))
+          : null,
+      refundDeduction:
+        status === 'REFUNDED' && deductionValue > 0
+          ? formatCurrency(deductionValue)
+          : null,
       myOrdersUrl: `${env.FRONTEND_URL.replace(/\/$/, '')}/my-orders`,
     };
 

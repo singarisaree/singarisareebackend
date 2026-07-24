@@ -45,11 +45,18 @@ export function buildWhatsAppTemplatePayload(options: {
   language: string;
   bodyParameters: string[];
   imageUrl?: string;
+  /** Preferred for marketing images — Meta media id from /{phone-number-id}/media */
+  imageId?: string;
   /** Meta AUTHENTICATION OTP templates require the code on body + copy-code button. */
   otpCopyCode?: boolean;
 }): Record<string, unknown> {
   const components: Array<Record<string, unknown>> = [];
-  if (options.imageUrl?.trim()) {
+  if (options.imageId?.trim()) {
+    components.push({
+      type: 'header',
+      parameters: [{ type: 'image', image: { id: options.imageId.trim() } }],
+    });
+  } else if (options.imageUrl?.trim()) {
     components.push({
       type: 'header',
       parameters: [{ type: 'image', image: { link: options.imageUrl.trim() } }],
@@ -295,6 +302,7 @@ export class WhatsAppService {
     kind: WhatsAppTemplateKind;
     bodyParameters: string[];
     imageUrl?: string;
+    imageId?: string;
     templateConfig?: WhatsAppRuntimeTemplateConfig;
     otpCopyCode?: boolean;
   }): Promise<WhatsAppSendResult> {
@@ -324,6 +332,7 @@ export class WhatsAppService {
           language: config.language,
           bodyParameters: options.bodyParameters,
           imageUrl: options.imageUrl,
+          imageId: options.imageId,
           otpCopyCode: options.otpCopyCode,
         }),
       );
@@ -337,6 +346,44 @@ export class WhatsAppService {
       const message = metaErrorMessage(error);
       logger.error('WhatsApp Cloud API send failed', { to, templateName, error: message });
       return { sent: false, error: message };
+    }
+  }
+
+  /**
+   * Upload a stored marketing image to Meta as JPEG media and return the media id.
+   * Required because WhatsApp template headers reject WebP and often fail on private links.
+   */
+  async uploadMarketingImageMedia(storedPath: string): Promise<string> {
+    const client = this.getClient();
+    const phoneNumberId = env.WHATSAPP_CLOUD_PHONE_NUMBER_ID?.trim();
+    if (!client || !phoneNumberId) {
+      throw new ApiError(503, 'WhatsApp Cloud API credentials are not configured');
+    }
+
+    const { buffer, mimeType, filename } =
+      await localStorageService.readJpegForWhatsApp(storedPath);
+
+    const FormData = (await import('form-data')).default;
+    const form = new FormData();
+    form.append('messaging_product', 'whatsapp');
+    form.append('type', mimeType);
+    form.append('file', buffer, { filename, contentType: mimeType });
+
+    try {
+      const response = await client.post(`/${phoneNumberId}/media`, form, {
+        headers: form.getHeaders(),
+        maxBodyLength: 6 * 1024 * 1024,
+        maxContentLength: 6 * 1024 * 1024,
+      });
+      const mediaId = response.data?.id as string | undefined;
+      if (!mediaId) {
+        throw new ApiError(502, 'Meta did not return a media id for the marketing image');
+      }
+      logger.info('WhatsApp marketing media uploaded', { mediaId, storedPath });
+      return mediaId;
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(502, metaErrorMessage(error));
     }
   }
 
@@ -501,18 +548,21 @@ export class WhatsAppService {
     story: string;
     campaignLink: string;
     mediaUrl?: string;
+    imageId?: string;
     templateConfig?: WhatsAppRuntimeTemplateConfig;
   }): Promise<WhatsAppSendResult> {
+    const useImage = Boolean(data.imageId || data.mediaUrl);
     return this.sendTemplate({
       to: data.to,
-      kind: data.mediaUrl ? 'marketing_image' : 'marketing_text',
+      kind: useImage ? 'marketing_image' : 'marketing_text',
       bodyParameters: [
         data.customerName.trim() || 'Customer',
         data.heading.trim(),
         data.story.trim(),
         data.campaignLink.trim(),
       ],
-      imageUrl: data.mediaUrl,
+      imageId: data.imageId,
+      imageUrl: data.imageId ? undefined : data.mediaUrl,
       templateConfig: data.templateConfig,
     });
   }

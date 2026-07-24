@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { authService } from './auth.service';
-import { loginSchema, refreshTokenSchema } from './auth.schema';
+import { changePasswordSchema, loginSchema, refreshTokenSchema } from './auth.schema';
 import { validateBody } from '@/middleware/validate';
 import { asyncHandler } from '@/middleware/validate';
 import { authenticateAdmin, AuthenticatedRequest } from '@/middleware/auth';
@@ -17,6 +17,32 @@ router.post(
     const result = await authService.login(email, password);
     authService.setAuthCookies(res, result.accessToken, result.refreshToken);
     sendSuccess(res, { admin: result.admin }, 'Login successful');
+  }),
+);
+
+router.post(
+  '/change-password',
+  authenticateAdmin,
+  validateBody(changePasswordSchema),
+  asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+    const adminId = req.admin?.id;
+    if (!adminId) {
+      res.status(401).json({ success: false, message: 'Authentication required' });
+      return;
+    }
+
+    const result = await authService.changePassword(adminId, {
+      currentPassword: req.body.currentPassword,
+      newPassword: req.body.newPassword,
+    });
+
+    sendSuccess(
+      res,
+      result,
+      result.emailSent
+        ? `Password updated. Confirmation emailed to ${result.email}`
+        : 'Password updated. Could not send confirmation email — check SMTP settings.',
+    );
   }),
 );
 

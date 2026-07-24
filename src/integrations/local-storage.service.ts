@@ -164,6 +164,44 @@ export class LocalStorageService {
     }
     return absolutePath;
   }
+
+  /**
+   * Load a stored image and re-encode as JPEG for WhatsApp (WebP/GIF not supported
+   * for template headers / media messages).
+   */
+  async readJpegForWhatsApp(
+    storedPath: string,
+  ): Promise<{ buffer: Buffer; mimeType: 'image/jpeg'; filename: string }> {
+    const absolutePath = this.resolveStoredPath(storedPath);
+    if (!absolutePath) {
+      throw new ApiError(400, 'Marketing image file was not found on the server');
+    }
+
+    try {
+      const buffer = await sharp(absolutePath)
+        .rotate()
+        .resize({ width: 1080, withoutEnlargement: true, fit: 'inside' })
+        .jpeg({ quality: 85, mozjpeg: true })
+        .toBuffer();
+
+      if (buffer.byteLength > 5 * 1024 * 1024) {
+        throw new ApiError(400, 'Marketing image is too large for WhatsApp (max 5 MB)');
+      }
+
+      return {
+        buffer,
+        mimeType: 'image/jpeg',
+        filename: 'marketing.jpg',
+      };
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      logger.error('Failed to prepare marketing image for WhatsApp', {
+        storedPath,
+        error: error instanceof Error ? error.message : error,
+      });
+      throw new ApiError(400, 'Could not prepare marketing image for WhatsApp');
+    }
+  }
 }
 
 export const localStorageService = new LocalStorageService();

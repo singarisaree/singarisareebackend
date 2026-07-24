@@ -1,4 +1,5 @@
 import nodemailer, { type Transporter } from 'nodemailer';
+import { randomBytes } from 'crypto';
 import { env } from '@/config/env';
 import { logger } from '@/utils/logger';
 
@@ -8,6 +9,10 @@ export type SendEmailInput = {
   html: string;
   text?: string;
   replyTo?: string;
+  /** Extra SMTP headers (e.g. List-Unsubscribe for marketing). */
+  headers?: Record<string, string>;
+  /** When true, adds marketing List-Unsubscribe headers. */
+  isMarketing?: boolean;
 };
 
 class EmailService {
@@ -55,16 +60,47 @@ class EmailService {
       return false;
     }
 
+    const domain = fromEmail.includes('@') ? fromEmail.split('@')[1]! : 'localhost';
+    const messageId = `<${Date.now()}.${randomBytes(8).toString('hex')}@${domain}>`;
+    const unsubscribeMailto = `mailto:${fromEmail}?subject=${encodeURIComponent('Unsubscribe')}`;
+
+    const headers: Record<string, string> = {
+      'Message-ID': messageId,
+      'X-Auto-Response-Suppress': 'OOF, AutoReply',
+      ...(input.headers ?? {}),
+    };
+
+    if (input.isMarketing) {
+      headers['List-Unsubscribe'] = `<${unsubscribeMailto}>`;
+      headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
+      headers['Precedence'] = 'bulk';
+    }
+
+    // Prefer plain-text companion so clients don't treat HTML-only as spammy.
+    const text =
+      input.text?.trim() ||
+      input.html
+        .replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
     try {
       await transporter.sendMail({
         from: `"${fromName}" <${fromEmail}>`,
         to,
         subject: input.subject,
         html: input.html,
-        ...(input.text ? { text: input.text } : {}),
-        ...(input.replyTo ? { replyTo: input.replyTo } : {}),
+        text,
+        replyTo: input.replyTo || fromEmail,
+        headers,
+        // Helps some providers associate envelope sender with From.
+        envelope: {
+          from: fromEmail,
+          to,
+        },
       });
-      logger.info('SMTP email sent', { to, subject: input.subject });
+      logger.info('SMTP email sent', { to, subject: input.subject, messageId });
       return true;
     } catch (error) {
       logger.error('SMTP email failed', {

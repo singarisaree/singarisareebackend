@@ -13,6 +13,7 @@ const CUSTOMER_SESSION_COOKIE = 'customerSession';
 const SESSION_COOKIE_MAX_AGE_MS = 10 * 365 * 24 * 60 * 60 * 1000;
 const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_RESEND_COOLDOWN_MS = 45 * 1000;
+const OTP_RESEND_COOLDOWN_SECONDS = Math.ceil(OTP_RESEND_COOLDOWN_MS / 1000);
 const MAX_OTP_ATTEMPTS = 5;
 
 const COOKIE_OPTIONS = {
@@ -69,6 +70,8 @@ export class CustomerAuthService {
   async sendOtp(phoneRaw: string): Promise<{
     phone: string;
     expiresInSeconds: number;
+    /** Seconds until another OTP can be requested for this phone. */
+    resendAfterSeconds: number;
     /** Dev-only fallback when providers are not configured */
     debugOtp?: string;
     /** Channels that accepted the same OTP (user can use either message). */
@@ -90,7 +93,15 @@ export class CustomerAuthService {
           orderBy: { createdAt: 'desc' },
         });
         if (recent) {
-          throw new ApiError(429, 'Please wait a moment before requesting another OTP');
+          const remainingMs = Math.max(
+            0,
+            OTP_RESEND_COOLDOWN_MS - (Date.now() - recent.createdAt.getTime()),
+          );
+          const waitSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+          throw new ApiError(
+            429,
+            `Please wait ${waitSeconds} second${waitSeconds === 1 ? '' : 's'} before requesting another OTP`,
+          );
         }
 
         await tx.customerOtpChallenge.create({
@@ -106,33 +117,34 @@ export class CustomerAuthService {
       throw error;
     }
 
-    // Same OTP on WhatsApp + SMS so the customer can use either message.
-    const [waResult, smsSent] = await Promise.all([
-      whatsAppService.sendLoginOtp({ phone, otp }),
-      sentService.sendOtp(phone, otp),
-    ]);
-
-    const channels: Array<'whatsapp' | 'sms' | 'debug'> = [];
-    if (waResult.sent) channels.push('whatsapp');
-    if (smsSent) channels.push('sms');
+    // Deliver on WhatsApp + SMS; respond as soon as the first channel succeeds
+    // so the login UI is not blocked by the slower provider.
+    const delivery = await this.deliverLoginOtp(phone, otp);
+    const channels = delivery.channels;
 
     if (channels.length > 0) {
       return {
         phone,
         expiresInSeconds: Math.floor(OTP_TTL_MS / 1000),
+        resendAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS,
         channels,
+        ...(delivery.debugOtp ? { debugOtp: delivery.debugOtp } : {}),
       };
     }
 
-    if (isDevelopment || (!sentService.isConfigured() && !(await whatsAppService.isLoginOtpConfigured()))) {
+    if (
+      isDevelopment ||
+      (!sentService.isConfigured() && !(await whatsAppService.isLoginOtpConfigured()))
+    ) {
       logger.warn('Login OTP not delivered — exposing debug OTP in non-production', {
         phone,
-        whatsappError: waResult.error,
+        whatsappError: delivery.whatsappError,
       });
       console.info(`[customer-auth] OTP for ${phone}: ${otp}`);
       return {
         phone,
         expiresInSeconds: Math.floor(OTP_TTL_MS / 1000),
+        resendAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS,
         debugOtp: otp,
         channels: ['debug'],
       };
@@ -140,15 +152,80 @@ export class CustomerAuthService {
 
     logger.warn('Login OTP failed on WhatsApp and SMS', {
       phone,
-      whatsappError: waResult.error,
+      whatsappError: delivery.whatsappError,
     });
 
     throw new ApiError(
       503,
-      waResult.error
-        ? `Could not send login OTP (${waResult.error}). Activate the Meta WhatsApp login OTP template and/or configure Sent.dm SMS.`
+      delivery.whatsappError
+        ? `Could not send login OTP (${delivery.whatsappError}). Activate the Meta WhatsApp login OTP template and/or configure Sent.dm SMS.`
         : 'Could not send login OTP. Activate the Meta WhatsApp login OTP template and/or configure Sent.dm SMS.',
     );
+  }
+
+  /** Send OTP on WhatsApp and SMS; resolve once at least one channel accepts. */
+  private async deliverLoginOtp(
+    phone: string,
+    otp: string,
+  ): Promise<{
+    channels: Array<'whatsapp' | 'sms' | 'debug'>;
+    whatsappError?: string;
+    debugOtp?: string;
+  }> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let waDone = false;
+      let smsDone = false;
+      let waSent = false;
+      let smsSent = false;
+      let whatsappError: string | undefined;
+
+      const finishIfReady = () => {
+        if (settled) return;
+        const channels: Array<'whatsapp' | 'sms'> = [];
+        if (waSent) channels.push('whatsapp');
+        if (smsSent) channels.push('sms');
+
+        // First successful channel — return immediately; other send continues in background.
+        if (channels.length > 0) {
+          settled = true;
+          resolve({ channels, whatsappError });
+          return;
+        }
+
+        if (waDone && smsDone) {
+          settled = true;
+          resolve({ channels: [], whatsappError });
+        }
+      };
+
+      void whatsAppService
+        .sendLoginOtp({ phone, otp })
+        .then((result) => {
+          waDone = true;
+          waSent = Boolean(result.sent);
+          if (!result.sent && result.error) whatsappError = result.error;
+          finishIfReady();
+        })
+        .catch((error) => {
+          waDone = true;
+          whatsappError =
+            error instanceof Error ? error.message : 'WhatsApp OTP send failed';
+          finishIfReady();
+        });
+
+      void sentService
+        .sendOtp(phone, otp)
+        .then((sent) => {
+          smsDone = true;
+          smsSent = Boolean(sent);
+          finishIfReady();
+        })
+        .catch(() => {
+          smsDone = true;
+          finishIfReady();
+        });
+    });
   }
 
   async verifyOtp(options: {

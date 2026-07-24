@@ -147,6 +147,16 @@ router.post(
   }),
 );
 
+router.post(
+  '/:orderNumber/abandon-checkout',
+  asyncHandler(async (req: Request, res: Response) => {
+    const result = await orderService.abandonPendingCheckout(
+      paramString(req.params.orderNumber),
+    );
+    sendSuccess(res, result, result.abandoned ? 'Pending checkout cancelled' : 'Nothing to cancel');
+  }),
+);
+
 // Admin routes
 router.get(
   '/',
