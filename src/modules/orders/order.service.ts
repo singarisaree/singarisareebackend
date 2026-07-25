@@ -808,9 +808,10 @@ export class OrderService {
         return { available: false, message: CUSTOMER_QUICK_UNAVAILABLE };
       }
 
+      const freeInstant = await settingsService.isQuickInstantDeliveryFree();
       return {
         available: true,
-        rate: quote.rate,
+        rate: freeInstant ? 0 : quote.rate,
         etaMinutes: quote.etaMinutes,
         currency: quote.currency,
         courierName: quote.courierName,
@@ -3591,9 +3592,10 @@ export class OrderService {
             : String(quick.etaMinutes)
           : 'same day';
 
+        const freeInstant = await settingsService.isQuickInstantDeliveryFree();
         return {
           courier: quick.courierName || 'Shiprocket Quick',
-          shippingFee: quick.rate,
+          shippingFee: freeInstant ? 0 : quick.rate,
           estimatedDays: etaLabel,
           currency: quick.currency || 'INR',
         };

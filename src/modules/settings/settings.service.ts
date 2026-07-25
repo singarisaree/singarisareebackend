@@ -20,6 +20,7 @@ const QUICK_PICKUP_LNG_KEY = 'quick_pickup_lng';
 const QUICK_DELIVERY_START_KEY = 'quick_delivery_start';
 const QUICK_DELIVERY_END_KEY = 'quick_delivery_end';
 const QUICK_HOLIDAYS_KEY = 'quick_holidays';
+const QUICK_INSTANT_FREE_KEY = 'quick_instant_delivery_free';
 const WHATSAPP_TEMPLATE_GROUP = 'whatsapp_templates';
 const WHATSAPP_TEMPLATE_CACHE_TTL_MS = 15 * 1000;
 /** Business timezone for Instant / Quick acceptance. */
@@ -688,6 +689,12 @@ export class SettingsService {
       return null;
     }
     return { latitude, longitude };
+  }
+
+  /** When true, Instant / Quick delivery is charged as ₹0 at checkout. */
+  async isQuickInstantDeliveryFree(): Promise<boolean> {
+    const row = await this.getByKey(QUICK_INSTANT_FREE_KEY);
+    return row?.value === true || row?.value === 'true';
   }
 
   /**
