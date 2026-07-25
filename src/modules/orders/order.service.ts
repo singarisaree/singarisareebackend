@@ -851,38 +851,69 @@ export class OrderService {
     shippingAddress: ShippingAddress;
     items: CheckoutItem[];
     couponCode?: string;
+    expectedGrandTotal?: number;
   }) {
-    const totals = await this.calculateOrderTotals(
+    const totalsPromise = this.calculateOrderTotals(
       data.items,
       data.couponCode,
       data.shippingAddress,
       data.customerPhone,
     );
-    const orderNumber = await this.allocateOrderNumber();
+    const orderNumberPromise = this.allocateOrderNumber();
+
+    type RzpSession =
+      | { ok: true; order: Awaited<ReturnType<typeof razorpayService.createOrder>> }
+      | { ok: false; error: unknown };
+
+    // Get order number first (fast), then start Razorpay with client total only if plausible.
+    const orderNumber = await orderNumberPromise;
+
+    const startRazorpayFor = (amountRupees: number): Promise<RzpSession> =>
+      razorpayService
+        .createOrder({
+          orderNumber,
+          amountRupees,
+          customerName: data.customerName,
+          customerEmail: data.customerEmail,
+          customerPhone: data.customerPhone,
+        })
+        .then((rzp) => ({ ok: true as const, order: rzp }))
+        .catch((error) => ({ ok: false as const, error }));
+
+    const clientTotal =
+      typeof data.expectedGrandTotal === 'number' && Number.isFinite(data.expectedGrandTotal)
+        ? Math.round(data.expectedGrandTotal * 100) / 100
+        : null;
+
+    // Secure early start: only allow a sane positive total (blocks absurd spoofed amounts).
+    const clientTotalSafe =
+      clientTotal != null && clientTotal > 0 && clientTotal <= 500_000 ? clientTotal : null;
+
+    let razorpaySessionPromise: Promise<RzpSession> | null =
+      clientTotalSafe != null ? startRazorpayFor(clientTotalSafe) : null;
+
+    const totals = await totalsPromise;
     const shippingAddress = geocodingService.resolveCoordinatesForCheckout(data.shippingAddress);
     const isFreeCheckout = totals.grandTotal <= 0;
+    const serverTotal = Math.round(totals.grandTotal * 100) / 100;
 
-    // Start the Razorpay order in parallel with the DB write so its network round-trip
-    // overlaps the transaction instead of adding to it. Wrapped so it never rejects;
-    // the outcome is inspected after the order is committed.
-    const razorpaySessionPromise: Promise<
-      | { ok: true; order: Awaited<ReturnType<typeof razorpayService.createOrder>> }
-      | { ok: false; error: unknown }
-      | null
-    > = isFreeCheckout
-      ? Promise.resolve(null)
-      : razorpayService
-          .createOrder({
-            orderNumber,
-            amountRupees: totals.grandTotal,
-            customerName: data.customerName,
-            customerEmail: data.customerEmail,
-            customerPhone: data.customerPhone,
-          })
-          .then((rzp) => ({ ok: true as const, order: rzp }))
-          .catch((error) => ({ ok: false as const, error }));
+    if (!isFreeCheckout) {
+      if (
+        razorpaySessionPromise &&
+        clientTotalSafe != null &&
+        Math.abs(clientTotalSafe - serverTotal) > 0.009
+      ) {
+        // Never open Checkout with a non-authoritative amount.
+        razorpaySessionPromise = startRazorpayFor(serverTotal);
+      } else if (!razorpaySessionPromise) {
+        razorpaySessionPromise = startRazorpayFor(serverTotal);
+      }
+    } else {
+      razorpaySessionPromise = null;
+    }
 
-    const order = await runPrismaTransaction(async (tx) => {
+    // DB write overlaps remaining Razorpay RTT.
+    const orderPromise = runPrismaTransaction(async (tx) => {
       const created = await tx.order.create({
         data: {
           orderNumber,
@@ -942,6 +973,11 @@ export class OrderService {
       return created;
     });
 
+    const [order, razorpaySession] = await Promise.all([
+      orderPromise,
+      isFreeCheckout ? Promise.resolve(null) : razorpaySessionPromise,
+    ]);
+
     void this.enrichOrderCoordinates(order.id, data.shippingAddress).catch((err) =>
       logger.warn('Background order geocoding failed', { orderId: order.id, err }),
     );
@@ -954,22 +990,24 @@ export class OrderService {
       })
       .catch((err) => logger.warn('Customer upsert failed', { err }));
 
-    if (totals.grandTotal <= 0) {
+    if (isFreeCheckout) {
       void this.sendOrderNotifications(order.id).catch((err) =>
         logger.warn('Order notifications failed', { orderId: order.id, err }),
       );
 
-      realtime.orderCreated({
-        orderId: order.id,
-        orderNumber: order.orderNumber,
-        status: order.status,
-        customerPhone: order.customerPhone,
-        grandTotal: Number(order.grandTotal),
+      setImmediate(() => {
+        realtime.orderCreated({
+          orderId: order.id,
+          orderNumber: order.orderNumber,
+          status: order.status,
+          customerPhone: order.customerPhone,
+          grandTotal: Number(order.grandTotal),
+        });
+        invalidateCache('product:');
+        invalidateCache('products:');
+        invalidateCache('storefront:');
+        realtime.catalogChanged('checkout-reserve');
       });
-      invalidateCache('product:');
-      invalidateCache('products:');
-      invalidateCache('storefront:');
-      realtime.catalogChanged('checkout-reserve');
 
       return {
         order,
@@ -981,41 +1019,52 @@ export class OrderService {
       };
     }
 
-    const razorpaySession = await razorpaySessionPromise;
     if (!razorpaySession || razorpaySession.ok === false) {
       logger.error('Razorpay session creation failed after order create', {
         orderId: order.id,
         orderNumber,
-        error: razorpaySession?.error,
+        error: razorpaySession && 'error' in razorpaySession ? razorpaySession.error : undefined,
       });
       await this.releasePendingOrder(order.id, 'Payment session initialization failed');
       throw new ApiError(502, 'Unable to start payment right now. Please try again.');
     }
     const razorpayOrder = razorpaySession.order;
 
-    void prisma.payment
-      .updateMany({
-        where: { orderId: order.id },
-        data: {
-          method: 'RAZORPAY',
-          razorpayOrderId: razorpayOrder.id,
-        },
-      })
-      .catch((err) =>
-        logger.warn('Deferred payment session update failed', { orderId: order.id, err }),
-      );
+    // Hard security gate: Checkout amount must equal server grand total.
+    const expectedPaise = razorpayService.toPaise(serverTotal);
+    if (Number(razorpayOrder.amount) !== expectedPaise) {
+      logger.error('Razorpay session amount mismatch — refusing checkout', {
+        orderNumber,
+        expectedPaise,
+        razorpayAmount: razorpayOrder.amount,
+      });
+      await this.releasePendingOrder(order.id, 'Payment amount mismatch');
+      throw new ApiError(502, 'Unable to start payment right now. Please try again.');
+    }
 
-    void realtime.orderCreated({
-      orderId: order.id,
-      orderNumber: order.orderNumber,
-      status: order.status,
-      customerPhone: order.customerPhone,
-      grandTotal: Number(order.grandTotal),
+    // Must be saved before Checkout opens — verify looks up payment by this id.
+    await prisma.payment.updateMany({
+      where: { orderId: order.id },
+      data: {
+        method: 'RAZORPAY',
+        razorpayOrderId: razorpayOrder.id,
+        amount: totals.grandTotal,
+      },
     });
-    invalidateCache('product:');
-    invalidateCache('products:');
-    invalidateCache('storefront:');
-    realtime.catalogChanged('checkout-reserve');
+
+    setImmediate(() => {
+      realtime.orderCreated({
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        status: order.status,
+        customerPhone: order.customerPhone,
+        grandTotal: Number(order.grandTotal),
+      });
+      invalidateCache('product:');
+      invalidateCache('products:');
+      invalidateCache('storefront:');
+      realtime.catalogChanged('checkout-reserve');
+    });
 
     return {
       order,

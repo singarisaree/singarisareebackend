@@ -3,7 +3,6 @@ import { Response } from 'express';
 import { prisma } from '@/config/database';
 import { env, isDevelopment } from '@/config/env';
 import { sentService } from '@/integrations/sent.service';
-import { whatsAppService } from '@/integrations/whatsapp.service';
 import { ApiError } from '@/shared/api-response';
 import { logger } from '@/utils/logger';
 import { whatsAppOutboxService } from '@/modules/whatsapp-outbox/whatsapp-outbox.service';
@@ -74,8 +73,8 @@ export class CustomerAuthService {
     resendAfterSeconds: number;
     /** Dev-only fallback when providers are not configured */
     debugOtp?: string;
-    /** Channels that accepted the same OTP (user can use either message). */
-    channels: Array<'whatsapp' | 'sms' | 'debug'>;
+    /** Channels that accepted the OTP (SMS via Sent.dm). */
+    channels: Array<'sms' | 'debug'>;
   }> {
     const phone = normalizePhone(phoneRaw);
     const otp = generateOtp();
@@ -117,29 +116,15 @@ export class CustomerAuthService {
       throw error;
     }
 
-    // Deliver on WhatsApp + SMS; respond as soon as the first channel succeeds
-    // so the login UI is not blocked by the slower provider.
-    const delivery = await this.deliverLoginOtp(phone, otp);
-    const channels = delivery.channels;
-
-    if (channels.length > 0) {
-      return {
-        phone,
-        expiresInSeconds: Math.floor(OTP_TTL_MS / 1000),
-        resendAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS,
-        channels,
-        ...(delivery.debugOtp ? { debugOtp: delivery.debugOtp } : {}),
-      };
-    }
-
-    if (
-      isDevelopment ||
-      (!sentService.isConfigured() && !(await whatsAppService.isLoginOtpConfigured()))
-    ) {
-      logger.warn('Login OTP not delivered — exposing debug OTP in non-production', {
-        phone,
-        whatsappError: delivery.whatsappError,
-      });
+    // Respond immediately after the challenge is stored. Sent.dm must not block the login UI.
+    if (!sentService.isConfigured()) {
+      if (!isDevelopment) {
+        throw new ApiError(
+          503,
+          'Could not send login OTP. Configure Sent.dm SMS.',
+        );
+      }
+      logger.warn('Login OTP SMS not configured — exposing debug OTP', { phone });
       console.info(`[customer-auth] OTP for ${phone}: ${otp}`);
       return {
         phone,
@@ -150,82 +135,36 @@ export class CustomerAuthService {
       };
     }
 
-    logger.warn('Login OTP failed on WhatsApp and SMS', {
-      phone,
-      whatsappError: delivery.whatsappError,
-    });
-
-    throw new ApiError(
-      503,
-      delivery.whatsappError
-        ? `Could not send login OTP (${delivery.whatsappError}). Activate the Meta WhatsApp login OTP template and/or configure Sent.dm SMS.`
-        : 'Could not send login OTP. Activate the Meta WhatsApp login OTP template and/or configure Sent.dm SMS.',
-    );
-  }
-
-  /** Send OTP on WhatsApp and SMS; resolve once at least one channel accepts. */
-  private async deliverLoginOtp(
-    phone: string,
-    otp: string,
-  ): Promise<{
-    channels: Array<'whatsapp' | 'sms' | 'debug'>;
-    whatsappError?: string;
-    debugOtp?: string;
-  }> {
-    return new Promise((resolve) => {
-      let settled = false;
-      let waDone = false;
-      let smsDone = false;
-      let waSent = false;
-      let smsSent = false;
-      let whatsappError: string | undefined;
-
-      const finishIfReady = () => {
-        if (settled) return;
-        const channels: Array<'whatsapp' | 'sms'> = [];
-        if (waSent) channels.push('whatsapp');
-        if (smsSent) channels.push('sms');
-
-        // First successful channel — return immediately; other send continues in background.
-        if (channels.length > 0) {
-          settled = true;
-          resolve({ channels, whatsappError });
+    void this.deliverLoginOtpSms(phone, otp)
+      .then((sent) => {
+        if (!sent) {
+          logger.warn('Login OTP SMS delivery failed', { phone });
           return;
         }
-
-        if (waDone && smsDone) {
-          settled = true;
-          resolve({ channels: [], whatsappError });
-        }
-      };
-
-      void whatsAppService
-        .sendLoginOtp({ phone, otp })
-        .then((result) => {
-          waDone = true;
-          waSent = Boolean(result.sent);
-          if (!result.sent && result.error) whatsappError = result.error;
-          finishIfReady();
-        })
-        .catch((error) => {
-          waDone = true;
-          whatsappError =
-            error instanceof Error ? error.message : 'WhatsApp OTP send failed';
-          finishIfReady();
+        logger.info('Login OTP delivered', { phone, channels: ['sms'] });
+      })
+      .catch((error) => {
+        logger.warn('Login OTP SMS delivery error', {
+          phone,
+          error: error instanceof Error ? error.message : String(error),
         });
+      });
 
-      void sentService
-        .sendOtp(phone, otp)
-        .then((sent) => {
-          smsDone = true;
-          smsSent = Boolean(sent);
-          finishIfReady();
-        })
-        .catch(() => {
-          smsDone = true;
-          finishIfReady();
-        });
-    });
+    return {
+      phone,
+      expiresInSeconds: Math.floor(OTP_TTL_MS / 1000),
+      resendAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS,
+      channels: ['sms'],
+    };
+  }
+
+  /** Login OTP via Sent.dm SMS only (no WhatsApp). */
+  private async deliverLoginOtpSms(phone: string, otp: string): Promise<boolean> {
+    try {
+      return Boolean(await sentService.sendOtp(phone, otp));
+    } catch {
+      return false;
+    }
   }
 
   async verifyOtp(options: {
@@ -267,15 +206,18 @@ export class CustomerAuthService {
       const existing = await tx.customer.findUnique({ where: { phone } });
       const suppliedName = options.name?.trim();
       const customerName = suppliedName || existing?.name || 'Customer';
+      const firstLogin = !existing?.lastLoginAt;
       const customer = await tx.customer.upsert({
         where: { phone },
         create: {
           phone,
           name: customerName,
           source: 'MANUAL',
+          lastLoginAt: now,
         },
         update: {
           deletedAt: null,
+          lastLoginAt: now,
           name:
             existing?.name === 'Customer' && suppliedName
               ? suppliedName
@@ -283,18 +225,7 @@ export class CustomerAuthService {
         },
       });
 
-      const firstLogin = (
-        await tx.customer.updateMany({
-          where: { id: customer.id, lastLoginAt: null },
-          data: { lastLoginAt: now },
-        })
-      ).count === 1;
-      if (!firstLogin) {
-        await tx.customer.update({
-          where: { id: customer.id },
-          data: { lastLoginAt: now },
-        });
-      } else {
+      if (firstLogin) {
         await tx.whatsAppOutboxEvent.upsert({
           where: { dedupeKey: `customer-welcome:${customer.id}` },
           create: {
@@ -317,7 +248,7 @@ export class CustomerAuthService {
           deviceLabel: null,
         },
       });
-      return { customer: { ...customer, lastLoginAt: now }, session };
+      return { customer, session };
     });
 
     if ('error' in transactionResult) {

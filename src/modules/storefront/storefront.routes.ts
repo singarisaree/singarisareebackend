@@ -10,7 +10,7 @@ const router = Router();
 router.get(
   '/homepage',
   asyncHandler(async (_req: Request, res: Response) => {
-    res.set('Cache-Control', 'public, max-age=30, stale-while-revalidate=120');
+    res.set('Cache-Control', 'public, max-age=5, stale-while-revalidate=30');
     const data = await storefrontService.getHomepage();
     sendSuccess(res, data, 'Homepage fetched');
   }),

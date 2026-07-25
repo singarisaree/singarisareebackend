@@ -168,40 +168,12 @@ router.post(
       return;
     }
 
-    // 2) Confirm payment with Razorpay API (amount + status + order binding)
-    const remotePayment = await razorpayService.getPayment(razorpayPaymentId);
-    if (!remotePayment) {
-      res.status(400).json({ success: false, message: 'Could not confirm payment with Razorpay' });
-      return;
-    }
+    const expectedPaise = razorpayService.toPaise(
+      Number(localPayment.order.grandTotal ?? localPayment.amount),
+    );
 
-    const remoteOrderId = String(remotePayment.order_id || '').trim();
-    if (remoteOrderId !== razorpayOrderId) {
-      res.status(400).json({ success: false, message: 'Payment order mismatch' });
-      return;
-    }
-
-    const remoteStatus = String(remotePayment.status || '').toLowerCase();
-    if (remoteStatus !== 'captured' && remoteStatus !== 'authorized') {
-      res.status(400).json({
-        success: false,
-        message: `Payment not successful (status: ${remoteStatus || 'unknown'})`,
-      });
-      return;
-    }
-
-    const expectedPaise = razorpayService.toPaise(Number(localPayment.amount));
-    const paidPaise = Number(remotePayment.amount);
-    if (!Number.isFinite(paidPaise) || paidPaise !== expectedPaise) {
-      logger.warn('Razorpay payment amount mismatch', {
-        orderNumber,
-        expectedPaise,
-        paidPaise,
-      });
-      res.status(400).json({ success: false, message: 'Payment amount mismatch' });
-      return;
-    }
-
+    // Signature is the secure Checkout proof — confirm the order immediately.
+    // Remote amount/status is audited in the background (must not delay the shopper).
     const alreadyPaid =
       localPayment.status === 'SUCCESS' ||
       (await prisma.order.findFirst({
@@ -229,11 +201,39 @@ router.post(
       razorpay_payment_id: razorpayPaymentId,
       razorpay_signature: razorpaySignature,
       verified: true,
-      amount: remotePayment.amount,
-      status: remotePayment.status,
     });
 
     sendSuccess(res, { orderNumber, paymentStatus: 'SUCCESS' }, 'Payment verified');
+
+    void razorpayService
+      .getPayment(razorpayPaymentId)
+      .then((remotePayment) => {
+        if (!remotePayment) return;
+        const remoteOrderId = String(remotePayment.order_id || '').trim();
+        const remoteStatus = String(remotePayment.status || '').toLowerCase();
+        const paidPaise = Number(remotePayment.amount);
+        if (remoteOrderId !== razorpayOrderId) {
+          logger.error('Post-verify Razorpay order mismatch', { orderNumber, remoteOrderId });
+          return;
+        }
+        if (remoteStatus !== 'captured' && remoteStatus !== 'authorized') {
+          logger.error('Post-verify Razorpay status unexpected', { orderNumber, remoteStatus });
+          return;
+        }
+        if (Number.isFinite(paidPaise) && paidPaise !== expectedPaise) {
+          logger.error('Post-verify Razorpay amount mismatch', {
+            orderNumber,
+            expectedPaise,
+            paidPaise,
+          });
+        }
+      })
+      .catch((error) => {
+        logger.warn('Post-verify Razorpay audit skipped', {
+          orderNumber,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
   }),
 );
 

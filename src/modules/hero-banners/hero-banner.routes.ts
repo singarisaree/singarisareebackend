@@ -14,6 +14,7 @@ import { realtime } from '@/realtime/emitter';
 
 function invalidateHeroBannerCaches(): void {
   invalidateCache('storefront:homepage');
+  invalidateCache('storefront:');
   realtime.catalogChanged('hero-banner');
 }
 
@@ -21,7 +22,8 @@ const router = Router();
 
 router.get(
   '/',
-  publicCache(120),
+  // Short TTL so homepage hero text/colors update quickly after admin edits
+  publicCache(5),
   asyncHandler(async (_req: Request, res: Response) => {
     const banners = await heroBannerService.findActive();
     sendSuccess(res, banners, 'Hero banners fetched');
@@ -49,10 +51,14 @@ router.post(
 
     const banner = await heroBannerService.create(
       {
+        brandText: req.body.brandText,
         title: req.body.title,
         subtitle: req.body.subtitle,
+        brandColor: req.body.brandColor,
+        titleColor: req.body.titleColor,
+        subtitleColor: req.body.subtitleColor,
         linkUrl: req.body.linkUrl,
-        sortOrder: req.body.sortOrder ? parseInt(req.body.sortOrder) : undefined,
+        sortOrder: req.body.sortOrder ? parseInt(req.body.sortOrder, 10) : undefined,
         isActive: req.body.isActive !== 'false',
         startsAt: req.body.startsAt,
         endsAt: req.body.endsAt,

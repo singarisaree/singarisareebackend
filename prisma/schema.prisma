@@ -577,8 +577,12 @@ model ReturnRequestTrackingHistory {
 
 model HeroBanner {
   id             String    @id @default(uuid()) @db.Uuid
+  brandText      String?   @map("brand_text")
   title          String?
   subtitle       String?
+  brandColor     String?   @map("brand_color")
+  titleColor     String?   @map("title_color")
+  subtitleColor  String?   @map("subtitle_color")
   imageUrl       String    @map("image_url")
   publicId       String    @map("public_id")
   mobileImageUrl String?   @map("mobile_image_url")

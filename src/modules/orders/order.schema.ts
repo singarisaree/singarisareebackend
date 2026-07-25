@@ -42,6 +42,8 @@ const checkoutBaseSchema = z.object({
     )
     .min(1),
   couponCode: z.string().optional(),
+  /** Client cart total — lets Razorpay session start while server recalculates. */
+  expectedGrandTotal: z.number().min(0).optional(),
 });
 
 export const checkoutSchema = checkoutBaseSchema.superRefine((data, ctx) => {
