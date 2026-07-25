@@ -738,7 +738,7 @@ export class OrderService {
   }
 
   /**
-   * Quote-only Shiprocket Quick (hyperlocal). Does not create a delivery.
+   * Quote-only Hyper-Local Instant (serviceability). Does not create a delivery.
    */
   async quoteQuickDelivery(
     items: CheckoutItem[],
@@ -1704,19 +1704,33 @@ export class OrderService {
       status: OrderStatus;
       refundedAt: Date | null;
       payments: Array<{ status: string }>;
+      shipping?: {
+        pickupOtp?: string | null;
+        dropOtp?: string | null;
+        rtoOtp?: string | null;
+        [key: string]: unknown;
+      } | null;
     },
   >(orders: T[]): T[] {
     return orders.map((order) => {
+      let next: T = order;
+
       if (this.isCustomerOrderRefunded(order) && order.status !== 'REFUNDED') {
-        return { ...order, status: 'REFUNDED' };
-      }
-      if (
+        next = { ...next, status: 'REFUNDED' };
+      } else if (
         order.payments.some((payment) => payment.status === 'SUCCESS') &&
         ['FAILED', 'PAYMENT_PENDING'].includes(order.status)
       ) {
-        return { ...order, status: 'PLACED' };
+        next = { ...next, status: 'PLACED' };
       }
-      return order;
+
+      // Customers only need Drop OTP — never expose pickup / RTO OTPs
+      if (next.shipping) {
+        const { pickupOtp: _pickup, rtoOtp: _rto, ...safeShipping } = next.shipping;
+        next = { ...next, shipping: { ...safeShipping, dropOtp: next.shipping.dropOtp ?? null } };
+      }
+
+      return next;
     });
   }
 

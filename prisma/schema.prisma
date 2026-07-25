@@ -436,6 +436,10 @@ model Shipping {
   trackingUrl          String?        @map("tracking_url")
   labelUrl             String?        @map("label_url")
   manifestUrl          String?        @map("manifest_url")
+  /** Hyper-Local Instant — 4-digit OTPs for rider app verification */
+  pickupOtp            String?        @map("pickup_otp") @db.VarChar(4)
+  dropOtp              String?        @map("drop_otp") @db.VarChar(4)
+  rtoOtp               String?        @map("rto_otp") @db.VarChar(4)
   pickupScheduled      DateTime?      @map("pickup_scheduled")
   shippedAt            DateTime?      @map("shipped_at")
   deliveredAt          DateTime?      @map("delivered_at")

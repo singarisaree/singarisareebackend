@@ -49,8 +49,17 @@ function flattenTrackingNodes(payload: Record<string, unknown>): Record<string, 
 }
 
 function mapNodeToStatus(node: Record<string, unknown>): OrderStatus | null {
+  // Prefer current_status_id — Hyper-Local docs reuse some shipment_status_id values differently
+  const currentId = Number(node.current_status_id);
+  if (Number.isFinite(currentId)) {
+    if (currentId === 7) return 'DELIVERED';
+    if ([16, 45, 55].includes(currentId)) return 'RTO';
+    if ([19, 94].includes(currentId)) return 'IN_TRANSIT'; // OFD / rider reached drop
+    if ([34, 51, 91, 93, 95].includes(currentId)) return 'SHIPPED'; // pickup / rider stages
+    // 1 NEW, 5 CANCELED — no forward fulfillment mapping
+  }
+
   const ids = [
-    node.current_status_id,
     node.shipment_status_id,
     node.status_code,
     node.sr_status,
@@ -59,11 +68,11 @@ function mapNodeToStatus(node: Record<string, unknown>): OrderStatus | null {
     .map((v) => Number(v))
     .filter((n) => Number.isFinite(n));
 
-  // Common Shiprocket shipment status ids
+  // Common Shiprocket shipment status ids (+ Hyper-Local shipment_status_id values)
   if (ids.some((id) => id === 7)) return 'DELIVERED';
-  if (ids.some((id) => [9, 10, 14, 40, 41, 42].includes(id))) return 'RTO';
-  if (ids.some((id) => [17, 18, 19, 20, 21, 22].includes(id))) return 'IN_TRANSIT';
-  if (ids.some((id) => [4, 5, 6, 15, 16].includes(id))) return 'SHIPPED';
+  if (ids.some((id) => [9, 10, 14, 16, 40, 41, 42, 46].includes(id))) return 'RTO';
+  if (ids.some((id) => [17, 18, 20, 21, 22, 82].includes(id))) return 'IN_TRANSIT';
+  if (ids.some((id) => [4, 5, 6, 15, 19, 79, 81].includes(id))) return 'SHIPPED';
 
   const text = [
     node.current_status,
@@ -82,10 +91,20 @@ function mapNodeToStatus(node: Record<string, unknown>): OrderStatus | null {
     return 'RTO';
   }
   if (/DELIVERED|DELIVERY COMPLETED/.test(text)) return 'DELIVERED';
-  if (/OUT FOR DELIVERY|\bOFD\b|IN TRANSIT|IN_TRANSIT|REACHED DESTINATION|AT DESTINATION/.test(text)) {
+  if (
+    /OUT FOR DELIVERY|\bOFD\b|IN TRANSIT|IN_TRANSIT|REACHED DESTINATION|AT DESTINATION|RIDER REACHED DROP/.test(
+      text,
+    )
+  ) {
     return 'IN_TRANSIT';
   }
-  if (/PICKED UP|PICKED_UP|SHIPPED|MANIFESTED|IN TRANSIT TO/.test(text)) return 'SHIPPED';
+  if (
+    /PICKED UP|PICKED_UP|SHIPPED|MANIFESTED|IN TRANSIT TO|RIDER ASSIGNED|OUT FOR PICKUP|RIDER REACHED PICKUP|SEARCHING FOR RIDER/.test(
+      text,
+    )
+  ) {
+    return 'SHIPPED';
+  }
 
   return null;
 }

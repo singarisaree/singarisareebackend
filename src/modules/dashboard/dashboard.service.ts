@@ -1,6 +1,6 @@
 import { prisma } from '@/config/database';
 import { env } from '@/config/env';
-import { shiprocketService, type ShiprocketShippingMode } from '@/integrations/shiprocket.service';
+import { shiprocketService, type ShiprocketShippingMode, generateHyperlocalOtps } from '@/integrations/shiprocket.service';
 import {
   canApplyShiprocketFulfillmentStatus,
   mapShiprocketPayloadToOrderStatus,
@@ -250,20 +250,53 @@ export class ShippingService {
   private cancellationSyncLastStartedAt = 0;
   private static readonly CANCELLATION_SYNC_COOLDOWN_MS = 45_000;
 
+  private buildDeliveryTypeFilter(deliveryType?: string): Prisma.OrderWhereInput | null {
+    const type = (deliveryType || 'ALL').toUpperCase();
+    if (type === 'ALL') return null;
+
+    const indiaAddressFilter: Prisma.OrderWhereInput = {
+      OR: [
+        { shippingAddress: { path: ['countryCode'], equals: 'IN' } },
+        { shippingAddress: { path: ['country'], equals: 'India' } },
+        { shippingAddress: { path: ['country'], equals: 'india' } },
+        { shippingAddress: { path: ['country'], equals: 'IN' } },
+      ],
+    };
+    // Prisma JSON NOT equals misses rows without the key — match STANDARD / null instead.
+    const nonQuickShippingFilter: Prisma.OrderWhereInput = {
+      OR: [
+        { shippingAddress: { path: ['preferredShipping'], equals: Prisma.DbNull } },
+        { shippingAddress: { path: ['preferredShipping'], equals: Prisma.JsonNull } },
+        { shippingAddress: { path: ['preferredShipping'], equals: 'STANDARD' } },
+      ],
+    };
+
+    if (type === 'QUICK') {
+      return { shippingAddress: { path: ['preferredShipping'], equals: 'QUICK' } };
+    }
+    if (type === 'INDIA') {
+      return { AND: [indiaAddressFilter, nonQuickShippingFilter] };
+    }
+    if (type === 'INTERNATIONAL') {
+      return { AND: [nonQuickShippingFilter, { NOT: indiaAddressFilter }] };
+    }
+    return null;
+  }
+
   private buildDispatchOrderWhere(
     courier?: string,
     search?: string,
     dateRange?: { gte?: Date; lte?: Date },
+    deliveryType?: string,
   ): Prisma.OrderWhereInput {
     const where: Prisma.OrderWhereInput = {
       deletedAt: null,
       status: 'READY_TO_SHIP',
-      // Only real Shiprocket bookings — never status-only "ready" orders
+      // Real Shiprocket bookings (AWB optional — Instant/HL soft-assign may not return AWB yet)
       shipping: {
         is: {
           method: 'SHIPROCKET',
           shiprocketShipmentId: { not: null },
-          awbCode: { not: null },
         },
       },
       ...(dateRange ? { createdAt: dateRange } : {}),
@@ -275,7 +308,6 @@ export class ShippingService {
           is: {
             method: 'SHIPROCKET',
             shiprocketShipmentId: { not: null },
-            awbCode: { not: null },
             OR: [{ courierName: null }, { courierName: '' }],
           },
         };
@@ -284,15 +316,16 @@ export class ShippingService {
           is: {
             method: 'SHIPROCKET',
             shiprocketShipmentId: { not: null },
-            awbCode: { not: null },
             courierName: { equals: courier, mode: 'insensitive' },
           },
         };
       }
     }
 
+    const andFilters: Prisma.OrderWhereInput[] = [];
+
     if (search) {
-      const searchFilter: Prisma.OrderWhereInput = {
+      andFilters.push({
         OR: [
           { orderNumber: { contains: search, mode: 'insensitive' } },
           { customerName: { contains: search, mode: 'insensitive' } },
@@ -301,52 +334,60 @@ export class ShippingService {
           { shipping: { is: { trackingNumber: { contains: search, mode: 'insensitive' } } } },
           { shipping: { is: { courierName: { contains: search, mode: 'insensitive' } } } },
         ],
-      };
+      });
+    }
+
+    const deliveryFilter = this.buildDeliveryTypeFilter(deliveryType);
+    if (deliveryFilter) andFilters.push(deliveryFilter);
+
+    if (andFilters.length > 0) {
       where.AND = [
         ...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []),
-        searchFilter,
+        ...andFilters,
       ];
     }
 
     return where;
   }
 
-  private async getCourierPartnerCounts(search?: string): Promise<{
+  private async getCourierPartnerCounts(
+    search?: string,
+    deliveryType?: string,
+  ): Promise<{
     total: number;
     unassigned: number;
     partners: { key: string; label: string; count: number }[];
   }> {
-    const cacheKey = `dashboard:courier-counts:${search?.trim() || 'all'}`;
-    return withCache(cacheKey, 30 * 1000, () => this.fetchCourierPartnerCounts(search));
+    const dt = (deliveryType || 'ALL').toUpperCase();
+    const cacheKey = `dashboard:courier-counts:${search?.trim() || 'all'}:${dt}`;
+    return withCache(cacheKey, 30 * 1000, () => this.fetchCourierPartnerCounts(search, dt));
   }
 
-  private async fetchCourierPartnerCounts(search?: string): Promise<{
+  private async fetchCourierPartnerCounts(
+    search?: string,
+    deliveryType = 'ALL',
+  ): Promise<{
     total: number;
     unassigned: number;
     partners: { key: string; label: string; count: number }[];
   }> {
-    if (!search?.trim()) {
-      const rows = await prisma.$queryRaw<Array<{ courier_name: string | null; count: number }>>`
-        SELECT s.courier_name, COUNT(*)::int AS count
-        FROM orders o
-        INNER JOIN shipping s ON s.order_id = o.id
-        WHERE o.deleted_at IS NULL
-          AND o.status = 'READY_TO_SHIP'
-          AND s.method = 'SHIPROCKET'
-          AND s.shiprocket_shipment_id IS NOT NULL
-          AND s.awb_code IS NOT NULL
-        GROUP BY s.courier_name
-      `;
+    // Use Prisma when filtering by delivery type (JSON path) or search
+    if (search?.trim() || deliveryType !== 'ALL') {
+      const baseWhere = this.buildDispatchOrderWhere(undefined, search, undefined, deliveryType);
+      const readyOrders = await prisma.order.findMany({
+        where: baseWhere,
+        select: { shipping: { select: { courierName: true } } },
+      });
 
-      let unassigned = 0;
       const counts = new Map<string, number>();
+      let unassigned = 0;
 
-      for (const row of rows) {
-        const name = row.courier_name?.trim();
+      for (const order of readyOrders) {
+        const name = order.shipping?.courierName?.trim();
         if (!name) {
-          unassigned += Number(row.count);
+          unassigned++;
         } else {
-          counts.set(name, Number(row.count));
+          counts.set(name, (counts.get(name) || 0) + 1);
         }
       }
 
@@ -354,54 +395,29 @@ export class ShippingService {
         .map(([key, count]) => ({ key, label: key, count }))
         .sort((a, b) => b.count - a.count);
 
-      const total = partners.reduce((sum, partner) => sum + partner.count, 0) + unassigned;
-      return { total, unassigned, partners };
+      return { total: readyOrders.length, unassigned, partners };
     }
 
-    const baseWhere: Prisma.OrderWhereInput = {
-      deletedAt: null,
-      status: 'READY_TO_SHIP',
-      shipping: {
-        is: {
-          method: 'SHIPROCKET',
-          shiprocketShipmentId: { not: null },
-          awbCode: { not: null },
-        },
-      },
-      ...(search
-        ? {
-            AND: [
-              {
-                OR: [
-                  { orderNumber: { contains: search, mode: 'insensitive' } },
-                  { customerName: { contains: search, mode: 'insensitive' } },
-                  { customerPhone: { contains: search } },
-                  { shipping: { is: { awbCode: { contains: search, mode: 'insensitive' } } } },
-                  {
-                    shipping: { is: { trackingNumber: { contains: search, mode: 'insensitive' } } },
-                  },
-                  { shipping: { is: { courierName: { contains: search, mode: 'insensitive' } } } },
-                ],
-              },
-            ],
-          }
-        : {}),
-    };
+    const rows = await prisma.$queryRaw<Array<{ courier_name: string | null; count: number }>>`
+      SELECT s.courier_name, COUNT(*)::int AS count
+      FROM orders o
+      INNER JOIN shipping s ON s.order_id = o.id
+      WHERE o.deleted_at IS NULL
+        AND o.status = 'READY_TO_SHIP'
+        AND s.method = 'SHIPROCKET'
+        AND s.shiprocket_shipment_id IS NOT NULL
+      GROUP BY s.courier_name
+    `;
 
-    const readyOrders = await prisma.order.findMany({
-      where: baseWhere,
-      select: { shipping: { select: { courierName: true } } },
-    });
-
-    const counts = new Map<string, number>();
     let unassigned = 0;
+    const counts = new Map<string, number>();
 
-    for (const order of readyOrders) {
-      const name = order.shipping?.courierName?.trim();
+    for (const row of rows) {
+      const name = row.courier_name?.trim();
       if (!name) {
-        unassigned++;
+        unassigned += Number(row.count);
       } else {
-        counts.set(name, (counts.get(name) || 0) + 1);
+        counts.set(name, Number(row.count));
       }
     }
 
@@ -409,7 +425,8 @@ export class ShippingService {
       .map(([key, count]) => ({ key, label: key, count }))
       .sort((a, b) => b.count - a.count);
 
-    return { total: readyOrders.length, unassigned, partners };
+    const total = partners.reduce((sum, partner) => sum + partner.count, 0) + unassigned;
+    return { total, unassigned, partners };
   }
 
   async listDispatches(query: Record<string, string>) {
@@ -425,7 +442,8 @@ export class ShippingService {
           : rawCourier;
     const search = query.search?.trim();
     const dateRange = parseCreatedAtFilter(query);
-    const where = this.buildDispatchOrderWhere(courier, search, dateRange);
+    const deliveryType = (query.deliveryType || 'ALL').toUpperCase();
+    const where = this.buildDispatchOrderWhere(courier, search, dateRange, deliveryType);
 
     const [orders, total, partnerCounts] = await Promise.all([
       prisma.order.findMany({
@@ -436,7 +454,7 @@ export class ShippingService {
         take: limit,
       }),
       prisma.order.count({ where }),
-      this.getCourierPartnerCounts(search),
+      this.getCourierPartnerCounts(search, deliveryType),
     ]);
 
     const dispatches = orders.map((order) => ({
@@ -552,20 +570,56 @@ export class ShippingService {
 
     if (resolvedMode === 'quick') {
       const quickPayload = await this.buildQuickLocationPayload(order, address);
-      // Instant: POST /v1/external/quick/quote only
+      // Instant: GET /courier/serviceability?is_new_hyperlocal=1 — return all HL options
       const quote = await shiprocketService.quoteQuickDelivery(quickPayload);
-      return {
-        mode: resolvedMode,
-        couriers: [
-          {
-            courierId: quote.courierId && quote.courierId > 0 ? quote.courierId : 1,
-            courierName: quote.courierName || 'Shiprocket Quick',
-            rate: quote.rate,
-            etd: quote.etaMinutes,
-            rating: null,
-          },
-        ],
-      };
+      const rawData = quote.raw?.data;
+      const rows = Array.isArray(rawData)
+        ? rawData.filter((r): r is Record<string, unknown> => Boolean(r) && typeof r === 'object')
+        : [];
+
+      const couriers =
+        rows.length > 0
+          ? rows
+              .map((row, index) => {
+                const rate =
+                  Number(row.rates) ||
+                  Number(row.rate) ||
+                  Number(row.freight_charge) ||
+                  Number(row.delivery_charge) ||
+                  0;
+                const distance = Number(row.distance);
+                const courierIdRaw = Number(row.courier_company_id ?? row.courier_id ?? row.id);
+                const nameRaw = row.courier_name ?? row.partner_name ?? row.service_name;
+                return {
+                  // Synthetic negative ids when HL omits courier_id (never sent to AWB assign)
+                  courierId:
+                    Number.isFinite(courierIdRaw) && courierIdRaw > 0
+                      ? courierIdRaw
+                      : -(index + 1),
+                  courierName:
+                    (typeof nameRaw === 'string' && nameRaw.trim()) || 'Shiprocket Quick',
+                  rate: Number.isFinite(rate) ? Math.round(rate * 100) / 100 : 0,
+                  etd:
+                    Number.isFinite(distance) && distance > 0
+                      ? `~${Math.round(distance * 10) / 10} km`
+                      : quote.etaMinutes,
+                  rating: null as number | null,
+                };
+              })
+              .filter((c) => Number.isFinite(c.rate) && c.rate >= 0)
+              .sort((a, b) => a.rate - b.rate)
+          : [
+              {
+                courierId:
+                  quote.courierId && quote.courierId > 0 ? quote.courierId : -1,
+                courierName: quote.courierName || 'Shiprocket Quick',
+                rate: quote.rate,
+                etd: quote.etaMinutes,
+                rating: null as number | null,
+              },
+            ];
+
+      return { mode: resolvedMode, couriers };
     }
 
     if (resolvedMode === 'international') {
@@ -1112,8 +1166,14 @@ export class ShippingService {
     }
 
     const address = this.parseShippingAddress(order.shippingAddress);
-    if (!address.addressLine1 || !address.postalCode || !address.city) {
+    if (!address.addressLine1 || !address.postalCode || !address.city || !address.state) {
       throw new ApiError(400, 'Order shipping address is incomplete');
+    }
+    if (address.latitude == null || address.longitude == null) {
+      throw new ApiError(
+        400,
+        'Delivery latitude/longitude are required for Hyper-Local Instant. Update the shipping address or wait for geocoding.',
+      );
     }
 
     const priorShipmentCount = await prisma.shipmentHistory.count({ where: { orderId } });
@@ -1124,63 +1184,136 @@ export class ShippingService {
         : `${order.orderNumber}-Q`;
 
     const quickLocation = await this.buildQuickLocationPayload(order, address);
-    const deliveryAddress = [
-      address.addressLine1,
-      address.addressLine2,
-      address.landmark,
-      address.city,
-      address.state,
-      address.postalCode,
-    ]
-      .filter(Boolean)
-      .join(', ');
+    const packageDims = this.resolveOrderPackageDimensions(order);
 
-    // Instant uses only POST /v1/external/quick/orders (no domestic fallback)
-    const quickOrder = await shiprocketService.createQuickDelivery({
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const created = order.createdAt;
+    const orderDate = `${created.getFullYear()}-${pad(created.getMonth() + 1)}-${pad(created.getDate())} ${pad(created.getHours())}:${pad(created.getMinutes())}`;
+
+    // Hyper-Local: POST /orders/create/adhoc with shipping_method HL + drop GPS + rider OTPs
+    const otps = generateHyperlocalOtps();
+    const shiprocketOrder = await shiprocketService.createQuickDelivery({
       ...quickLocation,
       orderRef,
+      orderDate,
       customerName: order.customerName,
       customerPhone: order.customerPhone,
       customerEmail: order.customerEmail,
-      pickupAddress: env.SHIPROCKET_PICKUP_LOCATION || 'Primary',
-      deliveryAddress,
+      pickupLocation: env.SHIPROCKET_PICKUP_LOCATION || 'Primary',
+      billingAddress: address.addressLine1,
+      billingAddress2: [address.addressLine2, address.landmark].filter(Boolean).join(', ') || undefined,
+      billingCity: address.city,
+      billingState: address.state,
+      billingCountry: address.country || 'India',
+      billingPincode: address.postalCode,
       paymentMethod: 'Prepaid',
       subTotal: Number(order.subtotal),
+      lengthCm: packageDims.length,
+      breadthCm: packageDims.width,
+      heightCm: packageDims.height,
+      otps,
       orderItems: order.items.map((item) => ({
         name: item.productName,
         sku: item.sku,
         units: item.quantity,
         sellingPrice: Number(item.unitPrice),
+        categoryName: 'Clothes',
+        hsn: 5208,
       })),
     });
 
-    const quickOrderId = shiprocketService.extractQuickOrderId(quickOrder);
-    if (!quickOrderId) {
-      throw new ApiError(502, 'Shiprocket Quick did not return an order id');
+    const shipmentId = shiprocketService.extractShipmentId(shiprocketOrder);
+    if (!shipmentId) {
+      throw new ApiError(502, 'Shiprocket Hyper-Local did not return a shipment id');
     }
 
-    const resolvedCourier = options?.courierName?.trim() || 'Shiprocket Quick';
+    const shiprocketOrderId = String(
+      shiprocketService.extractQuickOrderId(shiprocketOrder) ||
+        shiprocketOrder.order_id ||
+        '',
+    );
+    if (!shiprocketOrderId) {
+      throw new ApiError(502, 'Shiprocket Hyper-Local did not return an order id');
+    }
+
+    // HL AWB assign: shipment_id only — do not pass courier_id
+    const awbResult = await shiprocketService.generateAWB(shipmentId);
+    const awbData =
+      (awbResult.response as { data?: Record<string, unknown> } | undefined)?.data ??
+      (awbResult.data as Record<string, unknown> | undefined) ??
+      awbResult;
+    const awbCode =
+      (typeof awbData.awb_code === 'string' && awbData.awb_code) ||
+      (typeof awbResult.awb_code === 'string' && (awbResult.awb_code as string)) ||
+      null;
+    const resolvedCourier =
+      options?.courierName?.trim() ||
+      (typeof awbData.courier_name === 'string' && awbData.courier_name) ||
+      (typeof awbData.courier_company_name === 'string' && awbData.courier_company_name) ||
+      'Shiprocket Quick';
+
+    // Soft-assign success often returns { success: true, message: "We are processing..." }
+    // without an immediate AWB — still mark shipment as created so webhooks can fill AWB later.
+    const assignOk =
+      awbResult.success === true ||
+      Number(awbResult.awb_assign_status) === 1 ||
+      Boolean(awbCode);
+    if (!assignOk && awbResult.message) {
+      const msg = String(awbResult.message);
+      if (/no couriers serviceable|wallet|unauthorized|not found|invalid status/i.test(msg)) {
+        throw new ApiError(502, msg);
+      }
+    }
+
+    if (isRtoReship && order.shipping) {
+      await prisma.shipmentHistory.create({
+        data: {
+          orderId,
+          method: order.shipping.method,
+          shiprocketOrderId: order.shipping.shiprocketOrderId,
+          shiprocketShipmentId: order.shipping.shiprocketShipmentId,
+          awbCode: order.shipping.awbCode,
+          courierName: order.shipping.courierName,
+          trackingNumber: order.shipping.trackingNumber,
+          trackingUrl: order.shipping.trackingUrl,
+          labelUrl: order.shipping.labelUrl,
+          manifestUrl: order.shipping.manifestUrl,
+          shippedAt: order.shipping.shippedAt,
+          deliveredAt: order.shipping.deliveredAt,
+          reason: 'RTO Instant reshipment',
+        },
+      });
+    }
+
     const shipping = await prisma.shipping.upsert({
       where: { orderId },
       update: {
         method: 'SHIPROCKET',
-        shiprocketOrderId: quickOrderId,
-        shiprocketShipmentId: quickOrderId,
+        shiprocketOrderId,
+        shiprocketShipmentId: String(shipmentId),
         courierName: resolvedCourier,
-        awbCode: null,
-        trackingNumber: quickOrderId,
-        trackingUrl: null,
+        awbCode,
+        trackingNumber: awbCode || String(shipmentId),
+        trackingUrl: awbCode ? `https://shiprocket.co/tracking/${awbCode}` : null,
         labelUrl: null,
         manifestUrl: null,
+        pickupOtp: otps.pickupOtp,
+        dropOtp: otps.dropOtp,
+        rtoOtp: otps.rtoOtp,
         pickupScheduled: new Date(),
       },
       create: {
         orderId,
         method: 'SHIPROCKET',
-        shiprocketOrderId: quickOrderId,
-        shiprocketShipmentId: quickOrderId,
+        shiprocketOrderId,
+        shiprocketShipmentId: String(shipmentId),
         courierName: resolvedCourier,
-        trackingNumber: quickOrderId,
+        awbCode,
+        trackingNumber: awbCode || String(shipmentId),
+        trackingUrl: awbCode ? `https://shiprocket.co/tracking/${awbCode}` : null,
+        pickupOtp: otps.pickupOtp,
+        dropOtp: otps.dropOtp,
+        rtoOtp: otps.rtoOtp,
         pickupScheduled: new Date(),
       },
     });
@@ -1191,14 +1324,23 @@ export class ShippingService {
         data: {
           orderId,
           status: 'READY_TO_SHIP',
-          description: `Instant (Shiprocket Quick) booked via ${resolvedCourier}`,
+          description: `Instant (Hyper-Local) booked via ${resolvedCourier}${
+            awbCode ? ` · AWB ${awbCode}` : ''
+          } · Pickup OTP ${otps.pickupOtp} · Drop OTP ${otps.dropOtp}`,
         },
       });
-      orderEmailService.queueStatusEmail(orderId, 'READY_TO_SHIP');
     }
 
+    // Always email Delivery OTP when Instant is booked (customer needs drop OTP)
+    orderEmailService.queueStatusEmail(orderId, 'READY_TO_SHIP');
+
     await this.broadcastOrderShippingUpdate(orderId);
-    return { shipping, shiprocket: quickOrder, mode: 'quick' as const };
+    return {
+      shipping,
+      shiprocket: shiprocketOrder,
+      awb: awbResult,
+      mode: 'quick' as const,
+    };
   }
 
   async getShiprocketInvoice(orderId: string): Promise<{ invoiceUrl: string }> {
@@ -1256,15 +1398,16 @@ export class ShippingService {
 
     const shipping = order.shipping;
     const quickOrderId = shipping.shiprocketOrderId?.trim();
-    const isQuick =
+    const courierLooksQuick = shipping.courierName?.toLowerCase().includes('quick') ?? false;
+    // Legacy Instant used /quick/orders and stored the same id for order + shipment with no AWB
+    const isLegacyQuick =
       Boolean(quickOrderId) &&
-      (!shipping.awbCode ||
-        shipping.shiprocketShipmentId === quickOrderId ||
-        shipping.courierName?.toLowerCase().includes('quick'));
+      !shipping.awbCode &&
+      (shipping.shiprocketShipmentId === quickOrderId || courierLooksQuick);
 
     let result: Record<string, unknown> = {};
     try {
-      if (isQuick && quickOrderId) {
+      if (isLegacyQuick && quickOrderId) {
         result = await shiprocketService.cancelQuickDelivery(quickOrderId);
       } else if (shipping.awbCode) {
         result = await shiprocketService.cancelByAwbs([shipping.awbCode]);
@@ -1296,11 +1439,14 @@ export class ShippingService {
       where: { id: orderId, deletedAt: null },
       include: { shipping: true },
     });
-    const quickOrderId = order?.shipping?.shiprocketOrderId?.trim();
-    if (!quickOrderId) {
-      throw new ApiError(400, 'Quick delivery order id not found');
+    const shipping = order?.shipping;
+    const shipmentId = shipping?.shiprocketShipmentId?.trim();
+    const orderRef = shipping?.shiprocketOrderId?.trim();
+    const trackId = shipmentId || orderRef;
+    if (!trackId) {
+      throw new ApiError(400, 'Instant delivery shipment id not found');
     }
-    return shiprocketService.trackQuickOrder(quickOrderId);
+    return shiprocketService.trackQuickOrder(trackId, { awb: shipping?.awbCode });
   }
 
   /**
@@ -1687,6 +1833,21 @@ export class ShippingService {
     }
 
     const awb = String(payload.awb ?? payload.awb_code ?? order.shipping?.awbCode ?? '').trim();
+
+    // Hyper-Local webhooks may include rider OTPs — keep local copy in sync
+    const pickupOtp = String(payload.pickup_otp ?? '').replace(/\D/g, '').slice(0, 4);
+    const dropOtp = String(payload.drop_otp ?? '').replace(/\D/g, '').slice(0, 4);
+    if ((pickupOtp.length === 4 || dropOtp.length === 4) && order.shipping) {
+      await prisma.shipping.update({
+        where: { orderId: order.id },
+        data: {
+          ...(pickupOtp.length === 4 ? { pickupOtp } : {}),
+          ...(dropOtp.length === 4 ? { dropOtp } : {}),
+          ...(awb ? { awbCode: awb, trackingNumber: awb, trackingUrl: `https://shiprocket.co/tracking/${awb}` } : {}),
+        },
+      });
+    }
+
     const applied = await this.applyShiprocketFulfillmentStatus(order.id, nextStatus, {
       awbCode: awb || undefined,
       source: 'webhook',
@@ -1730,7 +1891,7 @@ export class ShippingService {
         id: true,
         orderNumber: true,
         status: true,
-        shipping: { select: { awbCode: true } },
+        shipping: { select: { awbCode: true, id: true } },
       },
     });
   }
@@ -2132,7 +2293,7 @@ export class ShippingService {
     if (address.latitude == null || address.longitude == null) {
       throw new ApiError(
         400,
-        'Delivery latitude/longitude are required for Shiprocket Quick. Update the shipping address or wait for geocoding.',
+        'Delivery latitude/longitude are required for Hyper-Local Instant. Update the shipping address or wait for geocoding.',
       );
     }
 

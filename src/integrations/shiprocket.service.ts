@@ -1,4 +1,5 @@
 import axios, { AxiosInstance } from 'axios';
+import { randomInt } from 'crypto';
 import { env } from '@/config/env';
 import { logger } from '@/utils/logger';
 import { ApiError } from '@/shared/api-response';
@@ -87,21 +88,59 @@ export interface ShiprocketQuickLocationPayload {
   cod?: boolean;
 }
 
+export interface ShiprocketHyperlocalOtps {
+  /** 4-digit OTP verified on the rider app at pickup */
+  pickupOtp: string;
+  /** 4-digit OTP verified on the rider app at drop */
+  dropOtp: string;
+  /** 4-digit OTP verified on the rider app for RTO */
+  rtoOtp: string;
+}
+
 export interface ShiprocketQuickOrderPayload extends ShiprocketQuickLocationPayload {
   orderRef: string;
   customerName: string;
   customerPhone: string;
   customerEmail?: string;
-  pickupAddress: string;
-  deliveryAddress: string;
+  /** Shiprocket pickup location name (from panel / addpickup). */
+  pickupLocation: string;
+  billingAddress: string;
+  billingAddress2?: string;
+  billingCity: string;
+  billingState: string;
+  billingCountry: string;
+  billingPincode: string;
   paymentMethod: string;
   subTotal: number;
+  lengthCm: number;
+  breadthCm: number;
+  heightCm: number;
+  orderDate?: string;
+  /** Hyper-Local rider verification OTPs (4 digits each). Generated if omitted. */
+  otps?: Partial<ShiprocketHyperlocalOtps>;
   orderItems: Array<{
     name: string;
     sku: string;
     units: number;
     sellingPrice: number;
+    /** Mandatory for Hyper-Local — Clothes | Electronics | Medicines | Food | Documents | Groceries | Others */
+    categoryName?: string;
+    hsn?: number;
   }>;
+}
+
+/** Cryptographically random 4-digit OTP (1000–9999) for Hyper-Local rider verification. */
+export function generateHyperlocalOtp(): string {
+  return String(randomInt(1000, 10000));
+}
+
+export function generateHyperlocalOtps(): ShiprocketHyperlocalOtps {
+  const pickupOtp = generateHyperlocalOtp();
+  let dropOtp = generateHyperlocalOtp();
+  while (dropOtp === pickupOtp) dropOtp = generateHyperlocalOtp();
+  let rtoOtp = generateHyperlocalOtp();
+  while (rtoOtp === pickupOtp || rtoOtp === dropOtp) rtoOtp = generateHyperlocalOtp();
+  return { pickupOtp, dropOtp, rtoOtp };
 }
 
 export interface ShiprocketQuickQuote {
@@ -231,14 +270,18 @@ export class ShiprocketService {
     return null;
   }
 
-  async generateAWB(shipmentId: number, courierId: number): Promise<Record<string, unknown>> {
+  /**
+   * Assign AWB. For Hyper-Local Instant, omit courierId — Shiprocket Quick is selected
+   * server-side. Passing a courier_id on HL shipments returns an error.
+   */
+  async generateAWB(shipmentId: number, courierId?: number): Promise<Record<string, unknown>> {
     try {
       const headers = await this.getAuthHeaders();
-      const response = await this.client.post(
-        '/courier/assign/awb',
-        { shipment_id: shipmentId, courier_id: courierId },
-        { headers },
-      );
+      const body: Record<string, unknown> = { shipment_id: shipmentId };
+      if (courierId != null && courierId > 0) {
+        body.courier_id = courierId;
+      }
+      const response = await this.client.post('/courier/assign/awb', body, { headers });
       return response.data as Record<string, unknown>;
     } catch (error) {
       logger.error('Shiprocket AWB generation failed', {
@@ -956,42 +999,24 @@ export class ShiprocketService {
     }
   }
 
-  private buildQuickLocationBody(payload: ShiprocketQuickLocationPayload): Record<string, unknown> {
-    return {
-      pickup_pincode: payload.pickupPostalCode,
-      delivery_pincode: payload.deliveryPostalCode,
-      pickup_postcode: payload.pickupPostalCode,
-      delivery_postcode: payload.deliveryPostalCode,
-      lat_from: payload.pickupLatitude,
-      long_from: payload.pickupLongitude,
-      lat_to: payload.deliveryLatitude,
-      long_to: payload.deliveryLongitude,
-      pickup_latitude: payload.pickupLatitude,
-      pickup_longitude: payload.pickupLongitude,
-      delivery_latitude: payload.deliveryLatitude,
-      delivery_longitude: payload.deliveryLongitude,
-      weight: Number(payload.weightKg.toFixed(3)),
-      cod: payload.cod ? 1 : 0,
-      ...(payload.declaredValue != null && payload.declaredValue > 0
-        ? { declared_value: Math.max(payload.declaredValue, 1) }
-        : {}),
-    };
-  }
-
-  private mapQuickQuote(data: Record<string, unknown>): ShiprocketQuickQuote {
-    const nested = data.data as Record<string, unknown> | undefined;
-    // Hyperlocal quotes come as array rows; dedicated /quick/quote wraps under data object
-    const node =
-      nested && typeof nested === 'object' && !Array.isArray(nested) ? nested : data;
+  private mapHyperlocalQuoteRow(
+    row: Record<string, unknown>,
+    raw: Record<string, unknown>,
+  ): ShiprocketQuickQuote {
     const rate =
-      Number(node.freight_charge) ||
-      Number(node.rate) ||
-      Number(node.rates) || // Shiprocket Quick hyperlocal uses `rates`
-      Number(node.delivery_charge) ||
-      Number(node.total_amount) ||
-      Number(node.amount) ||
+      Number(row.rates) ||
+      Number(row.rate) ||
+      Number(row.freight_charge) ||
+      Number(row.delivery_charge) ||
+      Number(row.total_amount) ||
+      Number(row.amount) ||
       0;
-    const etdHours = Number(node.etd_hours);
+    const distance = Number(row.distance);
+    const etaFromDistance =
+      Number.isFinite(distance) && distance > 0
+        ? `~${Math.round(distance * 10) / 10} km`
+        : null;
+    const etdHours = Number(row.etd_hours);
     const etaFromHours =
       Number.isFinite(etdHours) && etdHours > 0
         ? etdHours === 1
@@ -1000,108 +1025,204 @@ export class ShiprocketService {
         : null;
     const etaRaw =
       etaFromHours ??
-      node.eta ??
-      node.etd ??
-      node.estimated_delivery_time ??
-      node.estimated_time ??
-      node.delivery_time;
-    const courierNameRaw = node.courier_name ?? node.partner_name ?? node.service_name;
-    const courierIdRaw = Number(node.courier_company_id ?? node.courier_id ?? node.id);
+      etaFromDistance ??
+      row.eta ??
+      row.etd ??
+      row.estimated_delivery_time ??
+      row.estimated_time ??
+      row.delivery_time;
+    const courierNameRaw = row.courier_name ?? row.partner_name ?? row.service_name;
+    const courierIdRaw = Number(row.courier_company_id ?? row.courier_id ?? row.id);
     return {
       rate: Number.isFinite(rate) ? Math.round(rate * 100) / 100 : 0,
-      currency: String(node.currency ?? 'INR').trim() || 'INR',
+      currency: String(row.currency ?? 'INR').trim() || 'INR',
       etaMinutes: etaRaw != null && String(etaRaw).trim() ? String(etaRaw) : null,
       courierName:
         typeof courierNameRaw === 'string' && courierNameRaw.trim() ? courierNameRaw.trim() : null,
-      courierId:
-        Number.isFinite(courierIdRaw) && courierIdRaw > 0 ? courierIdRaw : null,
-      raw: data,
+      // HL serviceability often omits courier id — AWB assign must not send one
+      courierId: Number.isFinite(courierIdRaw) && courierIdRaw > 0 ? courierIdRaw : null,
+      raw,
     };
   }
 
   /**
-   * Instant / Shiprocket Quick — quote only via official Hyperlocal API:
-   * POST /v1/external/quick/quote
+   * Instant quote via Hyper-Local serviceability:
+   * GET /v1/external/courier/serviceability?is_new_hyperlocal=1&lat_from&long_from&lat_to&long_to
    */
   async quoteQuickDelivery(
     payload: ShiprocketQuickLocationPayload,
   ): Promise<ShiprocketQuickQuote> {
     const headers = await this.getAuthHeaders();
-    const body = this.buildQuickLocationBody(payload);
 
     try {
-      const response = await this.client.post('/quick/quote', body, { headers });
-      const quote = this.mapQuickQuote(response.data as Record<string, unknown>);
-      if (!Number.isFinite(quote.rate) || quote.rate < 0) {
-        throw new ApiError(400, 'Shiprocket Quick returned an invalid delivery charge');
+      const response = await this.client.get('/courier/serviceability', {
+        headers,
+        params: {
+          pickup_postcode: payload.pickupPostalCode,
+          delivery_postcode: payload.deliveryPostalCode,
+          lat_from: payload.pickupLatitude,
+          long_from: payload.pickupLongitude,
+          lat_to: payload.deliveryLatitude,
+          long_to: payload.deliveryLongitude,
+          is_new_hyperlocal: 1,
+          weight: Number(payload.weightKg.toFixed(3)),
+          cod: payload.cod ? 1 : 0,
+          ...(payload.declaredValue != null && payload.declaredValue > 0
+            ? { declared_value: Math.max(payload.declaredValue, 1) }
+            : {}),
+        },
+      });
+
+      const body = response.data as Record<string, unknown>;
+      const rowsRaw = body.data;
+      const rows = Array.isArray(rowsRaw)
+        ? rowsRaw.filter((r): r is Record<string, unknown> => Boolean(r) && typeof r === 'object')
+        : [];
+
+      if (body.status === false || rows.length === 0) {
+        throw new ApiError(400, 'Instant delivery is not available for this location');
       }
+
+      const quotes = rows
+        .map((row) => this.mapHyperlocalQuoteRow(row, body))
+        .filter((q) => Number.isFinite(q.rate) && q.rate >= 0)
+        .sort((a, b) => a.rate - b.rate);
+
+      const best = quotes[0];
+      if (!best) {
+        throw new ApiError(400, 'Instant delivery is not available for this location');
+      }
+
       return {
-        ...quote,
-        courierName: quote.courierName || 'Shiprocket Quick',
-        courierId: quote.courierId ?? 1,
+        ...best,
+        courierName: best.courierName || 'Shiprocket Quick',
       };
     } catch (error) {
       if (error instanceof ApiError) throw error;
       const status = axios.isAxiosError(error) ? error.response?.status : undefined;
-      logger.error('Shiprocket Quick quote failed', {
+      logger.error('Shiprocket Hyper-Local serviceability failed', {
         status,
         error: axios.isAxiosError(error) ? error.response?.data : error,
       });
-      if (status === 404) {
-        throw new ApiError(
-          502,
-          'Shiprocket Quick API is not enabled on this account (POST /quick/quote → 404). Ask Shiprocket to activate Hyperlocal Quick, then retry Instant.',
-        );
-      }
       throw new ApiError(
         502,
-        extractShiprocketMessage(error, 'Unable to calculate Instant (Shiprocket Quick) delivery charge'),
+        extractShiprocketMessage(error, 'Unable to calculate Instant (Hyper-Local) delivery charge'),
       );
     }
   }
 
   /**
-   * Instant create — official Hyperlocal API only:
-   * POST /v1/external/quick/orders
+   * Instant create via Hyper-Local adhoc order:
+   * POST /v1/external/orders/create/adhoc with shipping_method: "HL"
    */
   async createQuickDelivery(payload: ShiprocketQuickOrderPayload): Promise<Record<string, unknown>> {
+    const nameParts = payload.customerName.trim().split(/\s+/);
+    const firstName = nameParts[0] || 'Customer';
+    const lastName = nameParts.slice(1).join(' ') || '.';
+
     const body: Record<string, unknown> = {
-      ...this.buildQuickLocationBody(payload),
       order_id: payload.orderRef,
-      pickup_address: payload.pickupAddress,
-      delivery_address: payload.deliveryAddress,
-      customer_name: payload.customerName,
-      customer_phone: payload.customerPhone,
-      payment_method: payload.paymentMethod,
-      sub_total: payload.subTotal,
+      order_date:
+        payload.orderDate?.trim() ||
+        new Date().toISOString().slice(0, 16).replace('T', ' '),
+      pickup_location: payload.pickupLocation,
+      billing_customer_name: firstName,
+      billing_last_name: lastName,
+      billing_address: payload.billingAddress,
+      billing_address_2: payload.billingAddress2 || '',
+      billing_city: payload.billingCity,
+      billing_pincode: payload.billingPincode,
+      billing_state: payload.billingState,
+      billing_country: payload.billingCountry || 'India',
+      billing_email: payload.customerEmail || '',
+      billing_phone: payload.customerPhone,
+      shipping_is_billing: true,
+      latitude: payload.deliveryLatitude,
+      longitude: payload.deliveryLongitude,
       order_items: payload.orderItems.map((item) => ({
         name: item.name,
         sku: item.sku,
         units: item.units,
         selling_price: item.sellingPrice,
+        category_name: item.categoryName || 'Clothes',
+        hsn: item.hsn ?? 5208,
       })),
+      payment_method: payload.paymentMethod,
+      sub_total: payload.subTotal,
+      length: payload.lengthCm,
+      breadth: payload.breadthCm,
+      height: payload.heightCm,
+      weight: Number(payload.weightKg.toFixed(3)),
+      shipping_method: 'HL',
+      collect_shipping_fees: false,
     };
-    if (payload.customerEmail?.trim()) {
-      body.customer_email = payload.customerEmail.trim();
-    }
 
+    const otps = {
+      pickupOtp: /^\d{4}$/.test(payload.otps?.pickupOtp?.trim() || '')
+        ? payload.otps!.pickupOtp!.trim()
+        : generateHyperlocalOtp(),
+      dropOtp: /^\d{4}$/.test(payload.otps?.dropOtp?.trim() || '')
+        ? payload.otps!.dropOtp!.trim()
+        : generateHyperlocalOtp(),
+      rtoOtp: /^\d{4}$/.test(payload.otps?.rtoOtp?.trim() || '')
+        ? payload.otps!.rtoOtp!.trim()
+        : generateHyperlocalOtp(),
+    };
+    body.pickup_otp = Number(otps.pickupOtp);
+    body.drop_otp = Number(otps.dropOtp);
+    body.rto_otp = Number(otps.rtoOtp);
+
+    return this.createOrder(body);
+  }
+
+  /**
+   * Register / update a hyperlocal pickup location.
+   * POST /v1/external/settings/company/addpickup
+   */
+  async addHyperlocalPickup(payload: {
+    pickupLocation: string;
+    name: string;
+    email: string;
+    phone: string;
+    address: string;
+    address2?: string;
+    city: string;
+    state: string;
+    country?: string;
+    pinCode: string;
+    latitude: number;
+    longitude: number;
+  }): Promise<Record<string, unknown>> {
     try {
       const headers = await this.getAuthHeaders();
-      const response = await this.client.post('/quick/orders', body, { headers });
+      const response = await this.client.post(
+        '/settings/company/addpickup',
+        {
+          pickup_location: payload.pickupLocation,
+          name: payload.name,
+          email: payload.email,
+          phone: payload.phone,
+          address: payload.address,
+          address_2: payload.address2 || '',
+          city: payload.city,
+          state: payload.state,
+          country: payload.country || 'India',
+          pin_code: payload.pinCode,
+          lat: String(payload.latitude),
+          long: String(payload.longitude),
+          is_hyperlocal: 1,
+        },
+        { headers },
+      );
       return response.data as Record<string, unknown>;
     } catch (error) {
-      const status = axios.isAxiosError(error) ? error.response?.status : undefined;
-      logger.error('Shiprocket Quick order creation failed', {
-        status,
+      logger.error('Shiprocket add hyperlocal pickup failed', {
         error: axios.isAxiosError(error) ? error.response?.data : error,
       });
-      if (status === 404) {
-        throw new ApiError(
-          502,
-          'Shiprocket Quick API is not enabled on this account (POST /quick/orders → 404). Ask Shiprocket to activate Hyperlocal Quick before creating Instant shipments.',
-        );
-      }
-      throw new ApiError(502, extractShiprocketMessage(error, 'Quick delivery creation failed'));
+      throw new ApiError(
+        502,
+        extractShiprocketMessage(error, 'Failed to add Shiprocket hyperlocal pickup location'),
+      );
     }
   }
 
@@ -1121,32 +1242,67 @@ export class ShiprocketService {
     return null;
   }
 
-  /** GET /v1/external/quick/orders/{order_id} — Track Rider */
-  async trackQuickOrder(quickOrderId: string): Promise<Record<string, unknown>> {
-    const id = quickOrderId.trim();
-    if (!id) throw new ApiError(400, 'Quick order id is required');
-    try {
-      const headers = await this.getAuthHeaders();
-      const response = await this.client.get(`/quick/orders/${encodeURIComponent(id)}`, { headers });
-      return response.data as Record<string, unknown>;
-    } catch (error) {
-      const status = axios.isAxiosError(error) ? error.response?.status : undefined;
-      logger.error('Shiprocket Quick tracking failed', {
-        quickOrderId: id,
-        status,
-        error: axios.isAxiosError(error) ? error.response?.data : error,
-      });
-      if (status === 404) {
-        throw new ApiError(
-          502,
-          'Shiprocket Quick track API is not available (GET /quick/orders/{id} → 404).',
-        );
-      }
-      throw new ApiError(502, extractShiprocketMessage(error, 'Quick delivery tracking failed'));
+  /**
+   * Hyper-Local rider tracking:
+   * GET /v1/external/courier/hyperlocal/get_rider_data
+   */
+  async trackQuickOrder(
+    shipmentOrOrderId: string,
+    options?: { awb?: string | null },
+  ): Promise<Record<string, unknown>> {
+    const id = shipmentOrOrderId.trim();
+    if (!id) throw new ApiError(400, 'Shipment id is required for Instant tracking');
+
+    const headers = await this.getAuthHeaders();
+    const attempts: Array<Record<string, string>> = [{ shipment_id: id }];
+    if (options?.awb?.trim()) {
+      attempts.push({ awb: options.awb.trim() });
     }
+    if (/^\d+$/.test(id)) {
+      attempts.push({ order_id: id });
+    }
+
+    let lastError: unknown;
+    for (const params of attempts) {
+      try {
+        const response = await this.client.get('/courier/hyperlocal/get_rider_data', {
+          headers,
+          params,
+        });
+        return response.data as Record<string, unknown>;
+      } catch (error) {
+        lastError = error;
+        const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+        if (status && status !== 404 && status !== 400 && status !== 422) {
+          break;
+        }
+      }
+    }
+
+    // Legacy Quick orders (pre Hyper-Local migration) may still live under /quick/orders
+    try {
+      const response = await this.client.get(`/quick/orders/${encodeURIComponent(id)}`, {
+        headers,
+      });
+      return response.data as Record<string, unknown>;
+    } catch {
+      // fall through to last hyperlocal error
+    }
+
+    logger.error('Shiprocket Hyper-Local rider tracking failed', {
+      shipmentOrOrderId: id,
+      error: axios.isAxiosError(lastError) ? lastError.response?.data : lastError,
+    });
+    throw new ApiError(
+      502,
+      extractShiprocketMessage(lastError, 'Instant delivery tracking failed'),
+    );
   }
 
-  /** POST /v1/external/quick/orders/{order_id}/cancel */
+  /**
+   * Legacy Quick cancel — kept for shipments created before Hyper-Local migration.
+   * New Instant orders cancel via cancelOrders / cancelByAwbs.
+   */
   async cancelQuickDelivery(quickOrderId: string): Promise<Record<string, unknown>> {
     const id = quickOrderId.trim();
     if (!id) throw new ApiError(400, 'Quick order id is required');

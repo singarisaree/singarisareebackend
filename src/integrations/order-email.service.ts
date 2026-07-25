@@ -23,6 +23,9 @@ type OrderEmailPayload = {
   items: OrderEmailItem[];
   trackingUrl?: string | null;
   estimatedDelivery?: string | null;
+  /** Instant (Hyper-Local) — 4-digit code customer shares with rider */
+  dropOtp?: string | null;
+  isInstant?: boolean;
   refundCouponCode?: string | null;
   refundAmount?: string | null;
   refundDeduction?: string | null;
@@ -64,13 +67,35 @@ function formatDateLabel(value?: Date | string | null): string | null {
   });
 }
 
-function statusCopy(status: OrderStatus): {
+function statusCopy(
+  status: OrderStatus,
+  options?: { isInstant?: boolean; hasDropOtp?: boolean },
+): {
   eyebrow: string;
   headline: string;
   body: string;
   subject: string;
   ctaLabel: string;
 } {
+  if (options?.isInstant && options.hasDropOtp && status === 'READY_TO_SHIP') {
+    return {
+      eyebrow: 'Instant delivery',
+      headline: 'Your Instant order is ready — here’s your Delivery OTP',
+      body: 'Share the Delivery OTP below with the rider when your order arrives. You’ll also find it on My Orders.',
+      subject: 'Your Instant delivery OTP · Singari Sarees',
+      ctaLabel: 'View order',
+    };
+  }
+  if (options?.isInstant && options.hasDropOtp && (status === 'SHIPPED' || status === 'IN_TRANSIT')) {
+    return {
+      eyebrow: 'Instant delivery',
+      headline: status === 'SHIPPED' ? 'Your Instant order is on the way' : 'Your Instant order is nearby',
+      body: 'Share the Delivery OTP below with the rider when they arrive.',
+      subject: 'Instant delivery update · Singari Sarees',
+      ctaLabel: 'Track your order',
+    };
+  }
+
   switch (status) {
     case 'PAYMENT_PENDING':
       return {
@@ -179,6 +204,9 @@ function statusCopy(status: OrderStatus): {
   }
 }
 
+/** Statuses where Instant Delivery OTP belongs in the email. */
+const STATUSES_WITH_DROP_OTP = new Set<OrderStatus>(['READY_TO_SHIP', 'SHIPPED', 'IN_TRANSIT']);
+
 /** Statuses where delivery ETA is relevant. */
 const STATUSES_WITH_ETA = new Set<OrderStatus>([
   'PLACED',
@@ -220,7 +248,14 @@ function footerCopy(status: OrderStatus): string {
 }
 
 function buildEmailHtml(payload: OrderEmailPayload): string {
-  const copy = statusCopy(payload.status);
+  const showDropOtp =
+    Boolean(payload.isInstant) &&
+    Boolean(payload.dropOtp) &&
+    STATUSES_WITH_DROP_OTP.has(payload.status);
+  const copy = statusCopy(payload.status, {
+    isInstant: payload.isInstant,
+    hasDropOtp: showDropOtp,
+  });
   const name = escapeHtml(payload.customerName.split(' ')[0] || payload.customerName);
   const orderNo = escapeHtml(payload.shortOrderNumber);
   const showEta = STATUSES_WITH_ETA.has(payload.status) && Boolean(payload.estimatedDelivery);
@@ -246,6 +281,14 @@ function buildEmailHtml(payload: OrderEmailPayload): string {
 
   const etaBlock = showEta
     ? `<p style="margin:8px 0 0;color:#8a7a6b;font-size:13px;">Estimated delivery: <strong style="color:#3d2f24;">${escapeHtml(payload.estimatedDelivery!)}</strong></p>`
+    : '';
+
+  const dropOtpBlock = showDropOtp
+    ? `<div style="margin:18px 0 0;padding:16px 18px;background:#faf7f2;border-radius:12px;border:1px solid #efe8dc;">
+          <p style="margin:0;color:#8a7a6b;font-size:12px;letter-spacing:0.08em;text-transform:uppercase;">Delivery OTP</p>
+          <p style="margin:8px 0 0;color:#1c1612;font-size:28px;letter-spacing:0.28em;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:bold;">${escapeHtml(payload.dropOtp!)}</p>
+          <p style="margin:10px 0 0;color:#5c4c3f;font-size:13px;line-height:1.5;">Share this code with the rider when your Instant order arrives.</p>
+        </div>`
     : '';
 
   const couponBlock =
@@ -295,6 +338,7 @@ function buildEmailHtml(payload: OrderEmailPayload): string {
                 <p style="margin:6px 0 0;color:#1c1612;font-size:20px;letter-spacing:0.04em;">#${orderNo}</p>
                 ${etaBlock}
               </div>
+              ${dropOtpBlock}
               ${couponBlock}
               ${
                 showItems
@@ -337,7 +381,14 @@ function buildEmailHtml(payload: OrderEmailPayload): string {
 }
 
 function buildEmailText(payload: OrderEmailPayload): string {
-  const copy = statusCopy(payload.status);
+  const showDropOtp =
+    Boolean(payload.isInstant) &&
+    Boolean(payload.dropOtp) &&
+    STATUSES_WITH_DROP_OTP.has(payload.status);
+  const copy = statusCopy(payload.status, {
+    isInstant: payload.isInstant,
+    hasDropOtp: showDropOtp,
+  });
   const lines = [
     `Singari Sarees`,
     ``,
@@ -348,6 +399,9 @@ function buildEmailText(payload: OrderEmailPayload): string {
     ``,
     `Order #${payload.shortOrderNumber}`,
   ];
+  if (showDropOtp && payload.dropOtp) {
+    lines.push(``, `Delivery OTP: ${payload.dropOtp}`, `Share this code with the rider on delivery.`);
+  }
   if (STATUSES_WITH_ITEMS.has(payload.status)) {
     lines.push(`Total: ${payload.grandTotal}`);
   }
@@ -437,6 +491,7 @@ class OrderEmailService {
         refundCouponCode: true,
         refundAmount: true,
         refundDeduction: true,
+        shippingAddress: true,
         items: {
           select: {
             productName: true,
@@ -445,7 +500,7 @@ class OrderEmailService {
             unitPrice: true,
           },
         },
-        shipping: { select: { trackingUrl: true } },
+        shipping: { select: { trackingUrl: true, dropOtp: true } },
       },
     });
 
@@ -454,8 +509,15 @@ class OrderEmailService {
       return false;
     }
 
+    const shippingAddress = order.shippingAddress as { preferredShipping?: string } | null;
+    const isInstant = String(shippingAddress?.preferredShipping || '').toUpperCase() === 'QUICK';
+    const dropOtp =
+      isInstant && STATUSES_WITH_DROP_OTP.has(status) && /^\d{4}$/.test(order.shipping?.dropOtp || '')
+        ? order.shipping!.dropOtp!
+        : null;
+
     const shortOrderNumber = formatShortOrderNumber(order.orderNumber);
-    const copy = statusCopy(status);
+    const copy = statusCopy(status, { isInstant, hasDropOtp: Boolean(dropOtp) });
     const deductionValue =
       order.refundDeduction != null ? Number(order.refundDeduction) : 0;
     const payload: OrderEmailPayload = {
@@ -478,6 +540,8 @@ class OrderEmailService {
       estimatedDelivery: STATUSES_WITH_ETA.has(status)
         ? formatDateLabel(order.estimatedDelivery)
         : null,
+      dropOtp,
+      isInstant,
       refundCouponCode: status === 'REFUNDED' ? order.refundCouponCode : null,
       refundAmount:
         status === 'REFUNDED' && order.refundAmount != null

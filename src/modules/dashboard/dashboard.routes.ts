@@ -31,6 +31,7 @@ router.get(
   validateQuery(
     paginationSchema.extend({
       courier: z.string().optional(),
+      deliveryType: z.enum(['ALL', 'INDIA', 'QUICK', 'INTERNATIONAL']).optional(),
     }),
   ),
   asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
