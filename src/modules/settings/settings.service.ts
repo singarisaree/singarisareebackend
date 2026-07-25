@@ -694,7 +694,13 @@ export class SettingsService {
   /** When true, Instant / Quick delivery is charged as ₹0 at checkout. */
   async isQuickInstantDeliveryFree(): Promise<boolean> {
     const row = await this.getByKey(QUICK_INSTANT_FREE_KEY);
-    return row?.value === true || row?.value === 'true';
+    const value = row?.value;
+    if (value === true || value === 1) return true;
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      return normalized === 'true' || normalized === '1' || normalized === 'yes';
+    }
+    return false;
   }
 
   /**
