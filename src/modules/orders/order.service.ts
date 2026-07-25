@@ -894,6 +894,20 @@ export class OrderService {
       clientTotalSafe != null ? startRazorpayFor(clientTotalSafe) : null;
 
     const totals = await totalsPromise;
+    // Authoritative Instant free: never charge Instant fee when admin enabled free Instant
+    if (
+      data.shippingAddress?.preferredShipping === 'QUICK' &&
+      totals.shippingCharge > 0
+    ) {
+      const freeInstant = await settingsService.isQuickInstantDeliveryFree();
+      if (freeInstant) {
+        totals.shippingCharge = 0;
+        totals.grandTotal = Math.max(
+          0,
+          Math.round((totals.subtotal - totals.discountAmount + totals.taxAmount) * 100) / 100,
+        );
+      }
+    }
     const shippingAddress = geocodingService.resolveCoordinatesForCheckout(data.shippingAddress);
     const isFreeCheckout = totals.grandTotal <= 0;
     const serverTotal = Math.round(totals.grandTotal * 100) / 100;
@@ -3353,12 +3367,20 @@ export class OrderService {
       });
 
       const map = Object.fromEntries(settings.map((s) => [s.key, s.value]));
+      const freeInstantRaw = map.quick_instant_delivery_free;
+      const instantDeliveryFree =
+        freeInstantRaw === true ||
+        freeInstantRaw === 1 ||
+        (typeof freeInstantRaw === 'string' &&
+          ['true', '1', 'yes'].includes(freeInstantRaw.trim().toLowerCase()));
+
       return {
         defaultShippingCharge: Number(map.default_shipping_charge ?? 99),
         freeShippingThreshold: Number(map.free_shipping_threshold ?? 1999),
         freeShippingEnabled:
           map.free_shipping_enabled === true || map.free_shipping_enabled === 'true',
         estimatedDeliveryDays: Number(map.estimated_delivery_days ?? 7),
+        instantDeliveryFree,
       };
     });
   }
@@ -3592,7 +3614,11 @@ export class OrderService {
             : String(quick.etaMinutes)
           : 'same day';
 
-        const freeInstant = await settingsService.isQuickInstantDeliveryFree();
+        // Prefer cached shipping settings (same source used at checkout payment time)
+        const freeInstant =
+          shippingSettings.instantDeliveryFree === true ||
+          (await settingsService.isQuickInstantDeliveryFree());
+
         return {
           courier: quick.courierName || 'Shiprocket Quick',
           shippingFee: freeInstant ? 0 : quick.rate,

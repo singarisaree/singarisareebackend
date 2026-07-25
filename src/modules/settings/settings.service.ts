@@ -558,6 +558,9 @@ export class SettingsService {
       },
     });
     invalidatePublicSettingsCache();
+    if (group === 'shipping') {
+      invalidateCache('shipping-settings');
+    }
     if (group === WHATSAPP_TEMPLATE_GROUP) invalidateWhatsAppTemplatesCache();
     return result;
   }
