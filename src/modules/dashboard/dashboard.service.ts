@@ -15,6 +15,10 @@ import { logger } from '@/utils/logger';
 import { withCache, invalidateCache } from '@/utils/memory-cache';
 import { realtime } from '@/realtime/emitter';
 import { getOrderStatusTrackingDescription } from '@/modules/orders/order-tracking.sync';
+import {
+  estimatedDeliveryDateFromEtd,
+  normalizeShiprocketEtdLabel,
+} from '@/utils/delivery-estimate';
 
 const PENDING_STATUSES: OrderStatus[] = ['PLACED', 'PAYMENT_PENDING', 'CONFIRMED'];
 const REVENUE_STATUSES: OrderStatus[] = [
@@ -660,10 +664,20 @@ export class ShippingService {
       courierId?: number;
       pickupDate?: string;
       courierName?: string;
+      courierEtd?: string;
       mode?: ShiprocketShippingMode;
     },
   ) {
-    const mode = options.mode ?? 'domestic';
+    const orderForMode =
+      options.mode != null
+        ? null
+        : await prisma.order.findFirst({
+            where: { id: orderId, deletedAt: null },
+            select: { shippingAddress: true },
+          });
+    const mode =
+      options.mode ??
+      (orderForMode ? this.resolveShippingMode(orderForMode, undefined) : 'domestic');
     if (mode === 'quick') {
       return this.createQuickShiprocketOrder(orderId, {
         courierName: options.courierName,
@@ -685,6 +699,7 @@ export class ShippingService {
         courierId,
         pickupDate,
         courierName: options.courierName,
+        courierEtd: options.courierEtd,
       });
     }
 
@@ -692,6 +707,7 @@ export class ShippingService {
       courierId,
       pickupDate,
       courierName: options.courierName,
+      courierEtd: options.courierEtd,
     });
   }
 
@@ -701,6 +717,7 @@ export class ShippingService {
       courierId: number;
       pickupDate: string;
       courierName?: string;
+      courierEtd?: string;
       latitude?: number;
       longitude?: number;
       asInstantHyperlocal?: boolean;
@@ -749,6 +766,17 @@ export class ShippingService {
 
     if (!address?.addressLine1 || !address?.postalCode || !address?.city || !address?.state) {
       throw new ApiError(400, 'Order shipping address is incomplete');
+    }
+
+    let liveCourierEtd = options.courierEtd?.trim() || null;
+    if (!liveCourierEtd && !options.asInstantHyperlocal) {
+      try {
+        const { couriers } = await this.listAvailableCouriers(orderId, 'domestic');
+        liveCourierEtd =
+          couriers.find((c) => c.courierId === options.courierId)?.etd?.trim() || null;
+      } catch {
+        // ETA stays at checkout promise if courier list is unavailable
+      }
     }
 
     let shipmentId: number;
@@ -975,6 +1003,15 @@ export class ShippingService {
       });
     }
 
+    if (!options.asInstantHyperlocal) {
+      await this.syncOrderLiveDeliveryEstimateAfterShipment(orderId, order.shippingAddress, {
+        courierName,
+        courierEtd: liveCourierEtd,
+        pickupDate: pickupDay,
+        fallbackDays: 7,
+      });
+    }
+
     let labelUrl: string | null = shipping.labelUrl;
     if (awbCode && shipping.shiprocketShipmentId) {
       try {
@@ -1023,7 +1060,7 @@ export class ShippingService {
 
   private async createInternationalShiprocketOrder(
     orderId: string,
-    options: { courierId: number; pickupDate: string; courierName?: string },
+    options: { courierId: number; pickupDate: string; courierName?: string; courierEtd?: string },
   ) {
     const order = await prisma.order.findFirst({
       where: { id: orderId, deletedAt: null },
@@ -1047,6 +1084,17 @@ export class ShippingService {
     today.setHours(0, 0, 0, 0);
     if (Number.isNaN(pickupDay.getTime()) || pickupDay < today) {
       throw new ApiError(400, 'Pickup date cannot be in the past');
+    }
+
+    let liveCourierEtd = options.courierEtd?.trim() || null;
+    if (!liveCourierEtd) {
+      try {
+        const { couriers } = await this.listAvailableCouriers(orderId, 'international');
+        liveCourierEtd =
+          couriers.find((c) => c.courierId === options.courierId)?.etd?.trim() || null;
+      } catch {
+        // Shipment can still be created; ETA stays at checkout estimate if unavailable
+      }
     }
 
     const address = this.parseShippingAddress(order.shippingAddress);
@@ -1164,6 +1212,13 @@ export class ShippingService {
       });
       orderEmailService.queueStatusEmail(orderId, 'READY_TO_SHIP');
     }
+
+    await this.syncOrderLiveDeliveryEstimateAfterShipment(orderId, order.shippingAddress, {
+      courierName,
+      courierEtd: liveCourierEtd,
+      pickupDate: pickupDay,
+      fallbackDays: 14,
+    });
 
     await this.broadcastOrderShippingUpdate(orderId);
     return {
@@ -1557,7 +1612,12 @@ export class ShippingService {
   async bulkCreateShiprocketOrders(
     orderIds: string[],
     pickupDate: string,
-    selections?: Array<{ orderId: string; courierId: number; courierName?: string }>,
+    selections?: Array<{
+      orderId: string;
+      courierId: number;
+      courierName?: string;
+      courierEtd?: string;
+    }>,
   ) {
     const uniqueIds = [...new Set(orderIds)];
     const selectionById = new Map((selections ?? []).map((row) => [row.orderId, row] as const));
@@ -1575,10 +1635,12 @@ export class ShippingService {
         let courierId: number;
         let courierName: string;
         let rate: number | null = null;
+        let courierEtd: string | undefined;
 
         if (preselected) {
           courierId = preselected.courierId;
           courierName = preselected.courierName?.trim() || 'Courier';
+          courierEtd = preselected.courierEtd;
         } else {
           const { couriers } = await this.listAvailableCouriers(orderId);
           const cheapest = couriers[0];
@@ -1589,12 +1651,14 @@ export class ShippingService {
           courierId = cheapest.courierId;
           courierName = cheapest.courierName;
           rate = cheapest.rate;
+          courierEtd = cheapest.etd?.trim() || undefined;
         }
 
         await this.createShiprocketOrder(orderId, {
           courierId,
           pickupDate,
           courierName,
+          courierEtd,
         });
 
         succeeded.push({
@@ -2219,6 +2283,45 @@ export class ShippingService {
       grandTotal: Number(updatedOrder.grandTotal),
     });
     invalidateCache('dashboard:');
+  }
+
+  /** Replace checkout ETA with live Shiprocket ETD after shipment is booked (India + international). */
+  private async syncOrderLiveDeliveryEstimateAfterShipment(
+    orderId: string,
+    shippingAddressRaw: Prisma.JsonValue,
+    input: {
+      courierName: string | null;
+      courierEtd: string | null;
+      pickupDate: Date;
+      fallbackDays?: number;
+    },
+  ) {
+    const normalizedEta = normalizeShiprocketEtdLabel(input.courierEtd);
+    const courierName = input.courierName?.trim() || null;
+    if (!normalizedEta && !courierName) return;
+
+    const raw = (shippingAddressRaw ?? {}) as Record<string, unknown>;
+    const shippingAddress: Record<string, unknown> = {
+      ...raw,
+      ...(courierName ? { selectedCourier: courierName } : {}),
+      ...(normalizedEta ? { selectedCourierEta: normalizedEta } : {}),
+    };
+
+    const fallbackDays = Math.max(1, input.fallbackDays ?? 7);
+    const estimatedDelivery = normalizedEta
+      ? estimatedDeliveryDateFromEtd(normalizedEta, {
+          fallbackDays,
+          fromDate: input.pickupDate,
+        })
+      : undefined;
+
+    await prisma.order.update({
+      where: { id: orderId },
+      data: {
+        ...(estimatedDelivery ? { estimatedDelivery } : {}),
+        shippingAddress: shippingAddress as Prisma.InputJsonValue,
+      },
+    });
   }
 
   private parseShippingAddress(raw: Prisma.JsonValue | null): {

@@ -10,9 +10,16 @@ import {
   addDays,
   formatCurrency,
 } from '@/utils/helpers';
+import { parseEstimatedDeliveryDays } from '@/utils/delivery-estimate';
 import { buildPaginationMeta } from '@/shared/api-response';
 import { razorpayService } from '@/integrations/razorpay.service';
 import { shiprocketService } from '@/integrations/shiprocket.service';
+import {
+  buildCheckoutInternationalQuote,
+  computeInternationalChargeableWeightKg,
+  isInternationalRateCountry,
+  CHECKOUT_INTERNATIONAL_COURIER_LABEL,
+} from '@/integrations/international-shipping-rates';
 import { whatsAppService } from '@/integrations/whatsapp.service';
 import { orderEmailService } from '@/integrations/order-email.service';
 import { logger } from '@/utils/logger';
@@ -198,27 +205,6 @@ function parseQuickEtaDurationMs(estimatedDays: string | null | undefined): numb
     return Number.isFinite(hours) && hours > 0 ? hours * 3_600_000 : 60 * 60 * 1000;
   }
   return 60 * 60 * 1000;
-}
-
-/** Parse Shiprocket ETA strings like "5-7", "7 days", "About 1 hour" → whole days (min 1). */
-function parseEstimatedDeliveryDays(
-  estimatedDays: string | null | undefined,
-  fallback: number,
-): number {
-  const raw = String(estimatedDays ?? '').trim();
-  if (!raw) return Math.max(1, fallback);
-  if (/hour|minute|same.?day|today/i.test(raw)) return 0;
-  const range = raw.match(/(\d+)\s*[-–to]+\s*(\d+)/i);
-  if (range) {
-    const upper = Number(range[2]);
-    return Number.isFinite(upper) && upper > 0 ? upper : Math.max(1, fallback);
-  }
-  const single = raw.match(/(\d+)/);
-  if (single) {
-    const days = Number(single[1]);
-    return Number.isFinite(days) && days > 0 ? days : Math.max(1, fallback);
-  }
-  return Math.max(1, fallback);
 }
 
 function customerPhoneLookupVariants(phone: string): string[] {
@@ -664,7 +650,7 @@ export class OrderService {
 
   /**
    * Quote-only shipping (no shipment creation). India uses store settings;
-   * international uses Shiprocket X serviceability and picks the cheapest courier.
+   * international uses fixed weight-slab rates (no Shiprocket at checkout).
    */
   async quoteShipping(
     items: CheckoutItem[],
@@ -676,6 +662,7 @@ export class OrderService {
         shippingFee: number;
         estimatedDays: string;
         currency: string;
+        chargeableWeightKg?: number;
         options?: Array<{
           courier: string;
           shippingFee: number;
@@ -732,22 +719,29 @@ export class OrderService {
       const address = { ...shippingAddress, preferredShipping: 'STANDARD' as const };
 
       if (!this.isIndiaShippingAddress(address)) {
-        const payload = this.buildShiprocketRatePayload(subtotal, orderItems, address);
-        const options = await shiprocketService.listInternationalShippingQuotes(payload);
-        const first = options[0];
+        const countryCode = this.resolveCountryCode(address);
+        if (!countryCode || !isInternationalRateCountry(countryCode)) {
+          return {
+            success: false,
+            message: 'Delivery is not available for this location.',
+          };
+        }
+        const weightKg = computeInternationalChargeableWeightKg(orderItems);
+        const quote = buildCheckoutInternationalQuote(countryCode, weightKg);
+        const option = {
+          courier: quote.courier,
+          shippingFee: quote.shippingFee,
+          estimatedDays: quote.estimatedDays,
+          currency: quote.currency,
+        };
         return {
           success: true,
-          courier: first.courier,
-          shippingFee: first.shippingFee,
-          estimatedDays: first.estimatedDays,
-          currency: first.currency,
-          options: options.map((o) => ({
-            courier: o.courier,
-            shippingFee: o.shippingFee,
-            estimatedDays: o.estimatedDays,
-            currency: o.currency,
-            ...(o.courierCompanyId != null ? { courierCompanyId: o.courierCompanyId } : {}),
-          })),
+          courier: quote.courier,
+          shippingFee: quote.shippingFee,
+          estimatedDays: quote.estimatedDays,
+          currency: quote.currency,
+          chargeableWeightKg: quote.weightKg,
+          options: [option],
         };
       }
 
@@ -3782,42 +3776,38 @@ export class OrderService {
     return this.resolveInternationalShippingQuote(subtotal, orderItems, shippingAddress);
   }
 
-  private buildShiprocketRatePayload(
-    subtotal: number,
+  private resolveCheckoutInternationalShippingQuote(
     orderItems: Array<{
       quantity: number;
       weight: number | null;
-      length?: number | null;
-      width?: number | null;
-      height?: number | null;
     }>,
     shippingAddress: Partial<ShippingAddress>,
   ) {
     const countryCode = this.resolveCountryCode(shippingAddress);
-    const totalWeightGrams = orderItems.reduce(
-      (sum, item) => sum + (item.weight != null ? item.weight * item.quantity : 0),
-      0,
-    );
-    const weightKg = Math.max(totalWeightGrams / 1000, 0.5);
+    if (!countryCode || !isInternationalRateCountry(countryCode)) {
+      throw new ApiError(400, 'Delivery is not available for this location.');
+    }
+    const weightKg = computeInternationalChargeableWeightKg(orderItems);
+    const quote = buildCheckoutInternationalQuote(countryCode, weightKg);
 
-    let maxLength = 0;
-    let maxWidth = 0;
-    let totalHeight = 0;
-    for (const item of orderItems) {
-      if (item.length != null) maxLength = Math.max(maxLength, item.length);
-      if (item.width != null) maxWidth = Math.max(maxWidth, item.width);
-      if (item.height != null) totalHeight += item.height * item.quantity;
+    const selected = shippingAddress.selectedCourier?.trim();
+    if (selected && selected.toLowerCase() !== CHECKOUT_INTERNATIONAL_COURIER_LABEL.toLowerCase()) {
+      // Legacy orders may have Shiprocket courier names — still validate fee only
     }
 
-    return {
-      deliveryPostalCode: shippingAddress.postalCode!,
-      deliveryCountryCode: countryCode,
-      weightKg,
-      declaredValue: subtotal,
-      lengthCm: maxLength > 0 ? maxLength : 10,
-      breadthCm: maxWidth > 0 ? maxWidth : 10,
-      heightCm: totalHeight > 0 ? totalHeight : 5,
-    };
+    const expectedFee = shippingAddress.selectedShippingFee;
+    if (
+      expectedFee != null &&
+      Number.isFinite(expectedFee) &&
+      Math.abs(quote.shippingFee - expectedFee) > 0.02
+    ) {
+      throw new ApiError(
+        400,
+        'Shipping price changed. Please review shipping and try again.',
+      );
+    }
+
+    return quote;
   }
 
   private async resolveInternationalShippingQuote(
@@ -3831,38 +3821,8 @@ export class OrderService {
     }>,
     shippingAddress: Partial<ShippingAddress>,
   ) {
-    const payload = this.buildShiprocketRatePayload(subtotal, orderItems, shippingAddress);
-    const options = await shiprocketService.listInternationalShippingQuotes(payload);
-    if (!options.length) {
-      throw new ApiError(400, 'Delivery is not available for this location.');
-    }
-
-    const selected = shippingAddress.selectedCourier?.trim();
-    if (selected) {
-      const match = options.find(
-        (o) => o.courier.trim().toLowerCase() === selected.toLowerCase(),
-      );
-      if (!match) {
-        throw new ApiError(
-          400,
-          'Selected courier is no longer available. Please choose shipping again.',
-        );
-      }
-      const expectedFee = shippingAddress.selectedShippingFee;
-      if (
-        expectedFee != null &&
-        Number.isFinite(expectedFee) &&
-        Math.abs(match.shippingFee - expectedFee) > 0.02
-      ) {
-        throw new ApiError(
-          400,
-          'Shipping price changed. Please review courier options and try again.',
-        );
-      }
-      return match;
-    }
-
-    return options[0];
+    void subtotal;
+    return this.resolveCheckoutInternationalShippingQuote(orderItems, shippingAddress);
   }
 
   private computePackageDimensionsFromItems(

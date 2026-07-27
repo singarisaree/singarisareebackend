@@ -102,6 +102,7 @@ router.post(
             orderId: z.string().uuid(),
             courierId: z.number().int().positive(),
             courierName: z.string().trim().min(1).optional(),
+            courierEtd: z.string().trim().min(1).optional(),
           }),
         )
         .optional(),
@@ -150,6 +151,7 @@ router.post(
         .regex(/^\d{4}-\d{2}-\d{2}$/, 'Pickup date must be YYYY-MM-DD')
         .optional(),
       courierName: z.string().trim().min(1).optional(),
+      courierEtd: z.string().trim().min(1).optional(),
     }),
   ),
   asyncHandler(async (req: AuthenticatedRequest, res: Response) => {

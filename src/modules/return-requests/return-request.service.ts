@@ -17,6 +17,7 @@ import {
 import { realtime } from '@/realtime/emitter';
 import { whatsAppService } from '@/integrations/whatsapp.service';
 import { logger } from '@/utils/logger';
+import { isInternationalShippingAddressFromJson } from '@/utils/shipping-address';
 
 const ACTIVE_STATUSES: ReturnRequestStatus[] = [
   ReturnRequestStatus.REQUESTED,
@@ -187,6 +188,9 @@ export class ReturnRequestService {
     });
 
     if (!order) throw new ApiError(404, 'Order not found for this mobile number');
+    if (isInternationalShippingAddressFromJson(order.shippingAddress)) {
+      throw new ApiError(400, 'Returns are not available for international orders');
+    }
     if (order.status !== 'DELIVERED') {
       throw new ApiError(400, 'Return can only be requested for delivered orders');
     }
@@ -440,6 +444,9 @@ export class ReturnRequestService {
       include: { items: true },
     });
     if (!order) throw new ApiError(404, 'Order not found');
+    if (isInternationalShippingAddressFromJson(order.shippingAddress)) {
+      throw new ApiError(400, 'Returns are not available for international orders');
+    }
 
     const force = data.force !== false;
     if (!force && order.status !== 'DELIVERED') {
