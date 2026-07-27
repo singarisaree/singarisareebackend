@@ -579,6 +579,77 @@ export class ShiprocketService {
       throw new ApiError(400, 'A valid destination country is required for international shipping');
     }
 
+    try {
+      const { rows, lastMessage } = await this.collectInternationalServiceabilityRows(payload);
+      const byCourier = new Map<string, ShiprocketShippingQuote>();
+      for (const row of rows) {
+        const quote = this.mapCourierQuote(row);
+        if (!quote) continue;
+        const key = quote.courier.trim().toLowerCase();
+        const existing = byCourier.get(key);
+        if (!existing || quote.shippingFee < existing.shippingFee) {
+          byCourier.set(key, quote);
+        }
+      }
+
+      const sorted = [...byCourier.values()].sort((a, b) => a.shippingFee - b.shippingFee);
+      if (sorted.length > 0) {
+        return sorted.slice(0, 3);
+      }
+
+      logger.warn('Shiprocket international quote returned no couriers', {
+        countryCode,
+        weightKg: Math.max(0.5, Number(payload.weightKg) || 0.5),
+        lastMessage,
+      });
+
+      throw new ApiError(400, this.formatInternationalNoCourierMessage(countryCode, payload, lastMessage));
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      logger.error('Shiprocket international shipping quote failed', {
+        countryCode,
+        error: axios.isAxiosError(error) ? error.response?.data : error,
+      });
+      const message = extractShiprocketMessage(error, '');
+      if (/no serviceable|not available|not serviceable|given weight/i.test(message)) {
+        throw new ApiError(400, this.formatInternationalNoCourierMessage(countryCode, payload, message));
+      }
+      throw new ApiError(502, 'Unable to fetch international shipping fare right now');
+    }
+  }
+
+  private formatInternationalNoCourierMessage(
+    countryCode: string,
+    payload: ShiprocketRateQuotePayload,
+    shiprocketMessage: string,
+  ): string {
+    const weightKg = Math.max(0.5, Number(payload.weightKg) || 0.5);
+    const base = shiprocketMessage.trim() || 'No serviceable couriers available for this route.';
+    return `${base} (destination ${countryCode}, chargeable weight ${weightKg} kg). Update line-item weight (grams) on the order, confirm postal code, and ensure Shiprocket X international is enabled on your account.`;
+  }
+
+  private extractServiceabilityMessage(raw: unknown): string {
+    if (!raw || typeof raw !== 'object') return '';
+    const root = raw as Record<string, unknown>;
+    for (const key of ['message', 'msg', 'error']) {
+      const v = root[key];
+      if (typeof v === 'string' && v.trim()) return v.trim();
+    }
+    const data = root.data;
+    if (data && typeof data === 'object' && !Array.isArray(data)) {
+      const nested = data as Record<string, unknown>;
+      for (const key of ['message', 'msg', 'error']) {
+        const v = nested[key];
+        if (typeof v === 'string' && v.trim()) return v.trim();
+      }
+    }
+    return '';
+  }
+
+  private buildInternationalServiceabilityAttempts(
+    payload: ShiprocketRateQuotePayload,
+  ): Array<Record<string, string | number>> {
+    const countryCode = (payload.deliveryCountryCode || '').trim().toUpperCase();
     const pickupPostcode = String(env.SHIPROCKET_PICKUP_PINCODE || '500035').trim();
     const weightKg = Math.max(0.5, Number(payload.weightKg) || 0.5);
     const postal = payload.deliveryPostalCode?.trim()
@@ -599,81 +670,112 @@ export class ShiprocketService {
     if (payload.breadthCm && payload.breadthCm > 0) baseParams.breadth = payload.breadthCm;
     if (payload.heightCm && payload.heightCm > 0) baseParams.height = payload.heightCm;
 
-    const endpoints = [
-      '/international/courier/serviceability',
-      '/courier/international/serviceability',
-    ];
-    const attempts: Array<Record<string, string | number>> = [
+    return [
       baseParams,
       { ...baseParams, mode: 'Air' },
       { ...baseParams, mode: 'Surface' },
       { ...baseParams, weight: Math.max(1, Math.ceil(weightKg)) },
     ];
+  }
 
-    const byCourier = new Map<string, ShiprocketShippingQuote>();
-    let lastMessage = 'Delivery is not available for this location.';
+  private async collectInternationalServiceabilityRows(
+    payload: ShiprocketRateQuotePayload,
+    options?: { shiprocketOrderId?: number | string },
+  ): Promise<{ rows: Array<Record<string, unknown>>; lastMessage: string }> {
+    const endpoints = [
+      '/international/courier/serviceability',
+      '/courier/international/serviceability',
+    ];
+    const attempts = this.buildInternationalServiceabilityAttempts(payload);
+    const byCourierId = new Map<number, Record<string, unknown>>();
+    let lastMessage = 'No international courier partners available for this destination.';
 
-    try {
-      const headers = await this.getAuthHeaders();
+    const headers = await this.getAuthHeaders();
+    const srOrderId = options?.shiprocketOrderId;
+    const orderIdParam =
+      srOrderId != null && String(srOrderId).trim()
+        ? Number(srOrderId)
+        : NaN;
 
-      for (const endpoint of endpoints) {
-        for (const params of attempts) {
-          try {
-            const response = await this.client.get(endpoint, { headers, params });
-            const quotes = this.parseCourierRows(response.data)
-              .map((row) => this.mapCourierQuote(row))
-              .filter((q): q is ShiprocketShippingQuote => q !== null);
-
-            for (const q of quotes) {
-              const key = q.courier.trim().toLowerCase();
-              const existing = byCourier.get(key);
-              if (!existing || q.shippingFee < existing.shippingFee) {
-                byCourier.set(key, q);
-              }
-            }
-          } catch (attemptError) {
-            lastMessage = extractShiprocketMessage(
-              attemptError,
-              'Delivery is not available for this location.',
-            );
+    for (const endpoint of endpoints) {
+      for (const params of attempts) {
+        const query: Record<string, string | number> = { ...params };
+        if (Number.isFinite(orderIdParam) && orderIdParam > 0) {
+          query.order_id = orderIdParam;
+        }
+        try {
+          const response = await this.client.get(endpoint, { headers, params: query });
+          const msg = this.extractServiceabilityMessage(response.data);
+          if (msg) lastMessage = msg;
+          for (const row of this.parseCourierRows(response.data)) {
+            const courierId = Number(row.courier_company_id ?? row.id ?? row.courier_id);
+            if (!Number.isFinite(courierId) || courierId <= 0) continue;
+            byCourierId.set(courierId, row);
           }
+        } catch (attemptError) {
+          lastMessage = extractShiprocketMessage(
+            attemptError,
+            'No international courier partners available for this destination.',
+          );
         }
       }
+    }
 
-      const sorted = [...byCourier.values()].sort((a, b) => a.shippingFee - b.shippingFee);
-      if (sorted.length > 0) {
-        return sorted.slice(0, 3);
-      }
+    return { rows: [...byCourierId.values()], lastMessage };
+  }
 
-      logger.warn('Shiprocket international quote returned no couriers', {
-        countryCode,
-        postal,
-        weightKg,
-        pickupPostcode,
-        lastMessage,
+  async getInternationalCouriers(
+    payload: ShiprocketRateQuotePayload & { shiprocketOrderId?: number | string },
+  ): Promise<ShiprocketCourierOption[]> {
+    const countryCode = (payload.deliveryCountryCode || '').trim().toUpperCase();
+    if (!countryCode || countryCode.length !== 2) {
+      throw new ApiError(400, 'Destination country code is required for international couriers');
+    }
+
+    try {
+      const { rows, lastMessage } = await this.collectInternationalServiceabilityRows(payload, {
+        ...(payload.shiprocketOrderId != null ? { shiprocketOrderId: payload.shiprocketOrderId } : {}),
       });
 
-      if (/weight/i.test(lastMessage)) {
+      const couriers = rows
+        .map((row): ShiprocketCourierOption | null => {
+          const courierId = Number(row.courier_company_id ?? row.id ?? row.courier_id);
+          const courierName = String(
+            row.courier_name ?? row.courier_company_name ?? row.name ?? '',
+          ).trim();
+          if (!Number.isFinite(courierId) || courierId <= 0 || !courierName) return null;
+          const rate = this.extractCourierFreightRate(row);
+          const etdRaw = row.etd ?? row.estimated_delivery_days ?? row.edd;
+          const ratingRaw = Number(row.rating);
+          return {
+            courierId,
+            courierName,
+            rate: Number.isFinite(rate) ? rate : 0,
+            etd: etdRaw != null && String(etdRaw).trim() ? String(etdRaw) : null,
+            rating: Number.isFinite(ratingRaw) && ratingRaw > 0 ? ratingRaw : null,
+          };
+        })
+        .filter((c): c is ShiprocketCourierOption => c !== null)
+        .sort((a, b) => a.rate - b.rate);
+
+      if (couriers.length === 0) {
         throw new ApiError(
           400,
-          'Delivery is not available for this location. Shiprocket international (X) did not return any courier for this destination/weight. Confirm Shiprocket X is enabled on this API account and the destination is serviceable in your Shiprocket panel.',
+          this.formatInternationalNoCourierMessage(countryCode, payload, lastMessage),
         );
       }
-      throw new ApiError(400, 'Delivery is not available for this location.');
+
+      return couriers;
     } catch (error) {
       if (error instanceof ApiError) throw error;
-      logger.error('Shiprocket international shipping quote failed', {
+      logger.error('Shiprocket international courier serviceability failed', {
         countryCode,
         error: axios.isAxiosError(error) ? error.response?.data : error,
       });
-      const message = extractShiprocketMessage(error, '');
-      if (/no serviceable|not available|not serviceable|given weight/i.test(message)) {
-        throw new ApiError(
-          400,
-          'Delivery is not available for this location. Shiprocket international (X) did not return any courier for this destination. Please verify Shiprocket X is activated for API access.',
-        );
-      }
-      throw new ApiError(502, 'Unable to fetch international shipping fare right now');
+      throw new ApiError(
+        502,
+        extractShiprocketMessage(error, 'Unable to fetch international couriers'),
+      );
     }
   }
 
@@ -898,75 +1000,6 @@ export class ShiprocketService {
       throw new ApiError(502, 'Shiprocket did not return a manifest URL');
     }
     return url;
-  }
-
-  async getInternationalCouriers(
-    payload: ShiprocketRateQuotePayload & { shiprocketOrderId?: number | string },
-  ): Promise<ShiprocketCourierOption[]> {
-    const countryCode = (payload.deliveryCountryCode || '').trim().toUpperCase();
-    if (!countryCode || countryCode.length !== 2) {
-      throw new ApiError(400, 'Destination country code is required for international couriers');
-    }
-
-    const pickupPostcode = String(env.SHIPROCKET_PICKUP_PINCODE || '500035').trim();
-    const weightKg = Math.max(0.5, Number(payload.weightKg) || 0.5);
-    const params: Record<string, string | number> = {
-      pickup_postcode: pickupPostcode,
-      delivery_country: countryCode,
-      cod: 0,
-      weight: Number(weightKg.toFixed(3)),
-      declared_value: Math.max(payload.declaredValue, 1),
-    };
-    if (payload.deliveryPostalCode?.trim()) {
-      params.delivery_postcode = payload.deliveryPostalCode.trim();
-    }
-    if (payload.lengthCm && payload.lengthCm > 0) params.length = payload.lengthCm;
-    if (payload.breadthCm && payload.breadthCm > 0) params.breadth = payload.breadthCm;
-    if (payload.heightCm && payload.heightCm > 0) params.height = payload.heightCm;
-    const srOrderId = payload.shiprocketOrderId;
-    if (srOrderId != null && String(srOrderId).trim()) {
-      const numeric = Number(srOrderId);
-      if (Number.isFinite(numeric) && numeric > 0) params.order_id = numeric;
-    }
-
-    try {
-      const headers = await this.getAuthHeaders();
-      const response = await this.client.get('/international/courier/serviceability', {
-        headers,
-        params,
-      });
-      const couriers = this.parseCourierRows(response.data)
-        .map((row): ShiprocketCourierOption | null => {
-          const courierId = Number(row.courier_company_id ?? row.id ?? row.courier_id);
-          const courierName = String(
-            row.courier_name ?? row.courier_company_name ?? row.name ?? '',
-          ).trim();
-          if (!Number.isFinite(courierId) || courierId <= 0 || !courierName) return null;
-          const rate = this.extractCourierFreightRate(row);
-          const etdRaw = row.etd ?? row.estimated_delivery_days ?? row.edd;
-          const ratingRaw = Number(row.rating);
-          return {
-            courierId,
-            courierName,
-            rate: Number.isFinite(rate) ? rate : 0,
-            etd: etdRaw != null && String(etdRaw).trim() ? String(etdRaw) : null,
-            rating: Number.isFinite(ratingRaw) && ratingRaw > 0 ? ratingRaw : null,
-          };
-        })
-        .filter((c): c is ShiprocketCourierOption => c !== null)
-        .sort((a, b) => a.rate - b.rate);
-
-      return couriers;
-    } catch (error) {
-      logger.error('Shiprocket international courier serviceability failed', {
-        countryCode,
-        error: axios.isAxiosError(error) ? error.response?.data : error,
-      });
-      throw new ApiError(
-        502,
-        extractShiprocketMessage(error, 'Unable to fetch international couriers'),
-      );
-    }
   }
 
   async createInternationalForwardShipment(

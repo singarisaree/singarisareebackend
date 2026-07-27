@@ -12,6 +12,10 @@ import { ApiError, buildPaginationMeta } from '@/shared/api-response';
 import { OrderStatus, Prisma, ReturnRequestStatus } from '@prisma/client';
 import { parsePagination, parseCreatedAtFilter } from '@/utils/helpers';
 import { buildOrderDeliveryTypeFilter } from '@/utils/order-delivery-type-filter';
+import {
+  isSupportedInternationalCountryCode,
+  resolveShippingCountryIsoCode,
+} from '@/utils/shipping-address';
 import { logger } from '@/utils/logger';
 import { withCache, invalidateCache } from '@/utils/memory-cache';
 import { realtime } from '@/realtime/emitter';
@@ -600,21 +604,25 @@ export class ShippingService {
 
     if (resolvedMode === 'international') {
       const countryCode = this.resolveCountryCode(address);
-      const srOrderId = order.shipping?.shiprocketOrderId;
+      if (!countryCode || countryCode === 'IN' || !isSupportedInternationalCountryCode(countryCode)) {
+        throw new ApiError(
+          400,
+          'Order needs a supported international destination (country + ISO code). Edit shipping address on the order and save.',
+        );
+      }
       const couriers = await shiprocketService.getInternationalCouriers({
         deliveryPostalCode: postalCode,
         weightKg,
-        declaredValue,
+        declaredValue: Math.max(Number(order.subtotal), 1),
         deliveryCountryCode: countryCode,
         lengthCm: packageDims.length,
         breadthCm: packageDims.width,
         heightCm: packageDims.height,
-        ...(srOrderId ? { shiprocketOrderId: srOrderId } : {}),
       });
-      if (couriers.length === 0) {
-        throw new ApiError(400, 'No international courier partners available for this destination');
-      }
-      return this.wrapCourierListResult(resolvedMode, couriers, order.shippingAddress);
+      return this.wrapCourierListResult(resolvedMode, couriers, order.shippingAddress, {
+        chargeableWeightKg: weightKg,
+        destinationCountryCode: countryCode,
+      });
     }
 
     const couriers = await shiprocketService.getAvailableCouriers({
@@ -2362,7 +2370,10 @@ export class ShippingService {
     const selectedName = String(address.selectedCourier || '')
       .trim()
       .toLowerCase();
-    if (selectedName) {
+    const isCheckoutIntlLabel =
+      selectedName === 'international shipping' ||
+      selectedName.startsWith('international shipping ');
+    if (selectedName && !isCheckoutIntlLabel) {
       const exact = couriers.find(
         (c) => c.courierName.trim().toLowerCase() === selectedName,
       );
@@ -2380,11 +2391,18 @@ export class ShippingService {
     mode: ShiprocketShippingMode,
     couriers: ShiprocketCourierOption[],
     shippingAddress: Prisma.JsonValue | null,
+    meta?: { chargeableWeightKg?: number; destinationCountryCode?: string },
   ) {
     return {
       mode,
       couriers,
       defaultCourierId: this.resolveDefaultCourierId(couriers, shippingAddress),
+      ...(meta?.chargeableWeightKg != null
+        ? { chargeableWeightKg: meta.chargeableWeightKg }
+        : {}),
+      ...(meta?.destinationCountryCode
+        ? { destinationCountryCode: meta.destinationCountryCode }
+        : {}),
     };
   }
 
@@ -2405,10 +2423,7 @@ export class ShippingService {
     countryCode?: string;
     postalCode?: string;
   }): string {
-    const code = (address.countryCode || '').trim().toUpperCase();
-    if (code.length === 2) return code;
-    if (this.isIndiaShippingAddress(address)) return 'IN';
-    return code || 'IN';
+    return resolveShippingCountryIsoCode(address);
   }
 
   private resolveShippingMode(
@@ -2641,7 +2656,8 @@ export class ShippingService {
     }, 0);
 
     if (grams <= 0) return 0.5;
-    return Math.max(0.1, Math.round((grams / 1000) * 1000) / 1000);
+    const kg = Math.round((grams / 1000) * 1000) / 1000;
+    return Math.max(0.5, kg);
   }
 }
 

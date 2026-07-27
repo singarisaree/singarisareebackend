@@ -84,6 +84,39 @@ export const INTERNATIONAL_COUNTRY_NAMES = [
   'South Africa',
 ] as const;
 
+/** Country display name → ISO (matches checkout country list). */
+export const INTERNATIONAL_COUNTRY_NAME_TO_ISO: Record<string, string> = {
+  'United States': 'US',
+  Canada: 'CA',
+  'United Kingdom': 'GB',
+  Australia: 'AU',
+  'New Zealand': 'NZ',
+  'United Arab Emirates': 'AE',
+  'Saudi Arabia': 'SA',
+  Qatar: 'QA',
+  Kuwait: 'KW',
+  Singapore: 'SG',
+  Malaysia: 'MY',
+  Japan: 'JP',
+  'South Korea': 'KR',
+  'Hong Kong': 'HK',
+  Thailand: 'TH',
+  Indonesia: 'ID',
+  Vietnam: 'VN',
+  Germany: 'DE',
+  France: 'FR',
+  Netherlands: 'NL',
+  Italy: 'IT',
+  Switzerland: 'CH',
+  Belgium: 'BE',
+  Sweden: 'SE',
+  Norway: 'NO',
+  Denmark: 'DK',
+  Finland: 'FI',
+  Austria: 'AT',
+  'South Africa': 'ZA',
+};
+
 export const CHECKOUT_INTERNATIONAL_COURIER_LABEL = 'International shipping';
 
 /** Business-day range shown at checkout (e.g. "7-12" → "7–12 Business Days" in UI). */
