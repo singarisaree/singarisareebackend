@@ -674,18 +674,6 @@ export class OrderService {
     | { success: false; message: string }
   > {
     try {
-      if (
-        !shippingAddress.country?.trim() ||
-        !shippingAddress.state?.trim() ||
-        !shippingAddress.city?.trim() ||
-        !shippingAddress.postalCode?.trim()
-      ) {
-        return {
-          success: false,
-          message: 'Country, state, city, and postal code are required to calculate shipping.',
-        };
-      }
-
       const byColorId = await this.loadCheckoutProductsByColor(items);
       let subtotal = 0;
       const orderItems: Array<{
@@ -719,6 +707,12 @@ export class OrderService {
       const address = { ...shippingAddress, preferredShipping: 'STANDARD' as const };
 
       if (!this.isIndiaShippingAddress(address)) {
+        if (!shippingAddress.country?.trim()) {
+          return {
+            success: false,
+            message: 'Country is required to calculate international shipping.',
+          };
+        }
         const countryCode = this.resolveCountryCode(address);
         if (!countryCode || !isInternationalRateCountry(countryCode)) {
           return {
@@ -742,6 +736,18 @@ export class OrderService {
           currency: quote.currency,
           chargeableWeightKg: quote.weightKg,
           options: [option],
+        };
+      }
+
+      if (
+        !shippingAddress.country?.trim() ||
+        !shippingAddress.state?.trim() ||
+        !shippingAddress.city?.trim() ||
+        !shippingAddress.postalCode?.trim()
+      ) {
+        return {
+          success: false,
+          message: 'Country, state, city, and postal code are required to calculate shipping.',
         };
       }
 
