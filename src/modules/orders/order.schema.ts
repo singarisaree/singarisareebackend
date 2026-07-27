@@ -98,12 +98,46 @@ export const calculateTotalsSchema = z.object({
 
 export const shippingQuoteSchema = z.object({
   items: checkoutBaseSchema.shape.items,
-  shippingAddress: addressSchema.partial().extend({
-    country: z.string().min(2),
-    state: z.string().min(2),
-    city: z.string().min(2),
-    postalCode: z.string().min(2).max(16),
-  }),
+  shippingAddress: z
+    .object({
+      country: z.string().min(2),
+      countryCode: z
+        .string()
+        .trim()
+        .length(2)
+        .transform((v) => v.toUpperCase())
+        .optional(),
+      state: z.string().optional(),
+      city: z.string().optional(),
+      postalCode: z.string().max(16).optional(),
+      addressLine1: z.string().optional(),
+      addressLine2: z.string().optional(),
+      landmark: z.string().optional(),
+    })
+    .superRefine((address, ctx) => {
+      if (!isIndiaAddress(address)) return;
+      if (!address.state?.trim() || address.state.trim().length < 2) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['state'],
+          message: 'State is required for India shipping quotes',
+        });
+      }
+      if (!address.city?.trim() || address.city.trim().length < 2) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['city'],
+          message: 'City is required for India shipping quotes',
+        });
+      }
+      if (!address.postalCode?.trim() || address.postalCode.trim().length < 2) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['postalCode'],
+          message: 'Postal code is required for India shipping quotes',
+        });
+      }
+    }),
 });
 
 export const quickQuoteSchema = z.object({

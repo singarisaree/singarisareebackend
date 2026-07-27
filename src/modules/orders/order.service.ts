@@ -578,12 +578,24 @@ export class OrderService {
     let couponId: string | undefined;
     let appliedCouponCode: string | undefined;
 
-    const shippingQuote = await this.resolveShippingQuote(
-      subtotal,
-      orderItems,
-      shippingAddress,
-      settings,
-    );
+    const isQuickCheckout =
+      String(shippingAddress?.preferredShipping || '').trim().toUpperCase() === 'QUICK';
+    const isInternationalCheckout =
+      shippingAddress != null &&
+      !isQuickCheckout &&
+      !this.isIndiaShippingAddress(shippingAddress);
+
+    const shippingQuote = isInternationalCheckout
+      ? this.resolveInternationalSlabShippingForCheckout(
+          orderItems.map((i) => ({ quantity: i.quantity, weight: i.weight })),
+          shippingAddress,
+        )
+      : await this.resolveShippingQuote(
+          subtotal,
+          orderItems,
+          shippingAddress,
+          settings,
+        );
     const shippingCharge = shippingQuote.shippingFee;
 
     if (couponCode) {
@@ -641,7 +653,7 @@ export class OrderService {
         shippingFee: shippingQuote.shippingFee,
         estimatedDays: shippingQuote.estimatedDays,
         currency: shippingQuote.currency,
-        ...(shippingQuote.courierCompanyId != null
+        ...( 'courierCompanyId' in shippingQuote && shippingQuote.courierCompanyId != null
           ? { courierCompanyId: shippingQuote.courierCompanyId }
           : {}),
       },
@@ -649,8 +661,8 @@ export class OrderService {
   }
 
   /**
-   * Quote-only shipping (no shipment creation). India uses store settings;
-   * international uses fixed weight-slab rates (no Shiprocket at checkout).
+   * Quote-only shipping (no shipment creation). India uses store settings / Quick (Shiprocket HL);
+   * international uses fixed weight-slab rates only — no Shiprocket API at checkout.
    */
   async quoteShipping(
     items: CheckoutItem[],
@@ -713,30 +725,35 @@ export class OrderService {
             message: 'Country is required to calculate international shipping.',
           };
         }
-        const countryCode = this.resolveCountryCode(address);
-        if (!countryCode || !isInternationalRateCountry(countryCode)) {
-          return {
-            success: false,
-            message: 'Delivery is not available for this location.',
+        try {
+          const quote = this.resolveInternationalSlabShippingForCheckout(
+            orderItems.map((i) => ({ quantity: i.quantity, weight: i.weight })),
+            shippingAddress,
+          );
+          const option = {
+            courier: quote.courier,
+            shippingFee: quote.shippingFee,
+            estimatedDays: quote.estimatedDays,
+            currency: quote.currency,
           };
+          return {
+            success: true,
+            courier: quote.courier,
+            shippingFee: quote.shippingFee,
+            estimatedDays: quote.estimatedDays,
+            currency: quote.currency,
+            chargeableWeightKg: quote.weightKg,
+            options: [option],
+          };
+        } catch (error) {
+          if (error instanceof ApiError && error.statusCode === 400) {
+            return {
+              success: false,
+              message: error.message || 'Delivery is not available for this location.',
+            };
+          }
+          throw error;
         }
-        const weightKg = computeInternationalChargeableWeightKg(orderItems);
-        const quote = buildCheckoutInternationalQuote(countryCode, weightKg);
-        const option = {
-          courier: quote.courier,
-          shippingFee: quote.shippingFee,
-          estimatedDays: quote.estimatedDays,
-          currency: quote.currency,
-        };
-        return {
-          success: true,
-          courier: quote.courier,
-          shippingFee: quote.shippingFee,
-          estimatedDays: quote.estimatedDays,
-          currency: quote.currency,
-          chargeableWeightKg: quote.weightKg,
-          options: [option],
-        };
       }
 
       if (
@@ -3762,24 +3779,28 @@ export class OrderService {
       };
     }
 
-    if (
-      !shippingAddress?.country?.trim() ||
-      !shippingAddress?.state?.trim() ||
-      !shippingAddress?.city?.trim() ||
-      !shippingAddress?.postalCode?.trim()
-    ) {
-      throw new ApiError(
-        400,
-        'Country, state, city, and postal code are required for international shipping',
-      );
-    }
+    throw new ApiError(
+      400,
+      'Use international slab shipping for non-India checkout (no Shiprocket quote).',
+    );
+  }
 
-    const countryCode = this.resolveCountryCode(shippingAddress);
-    if (!countryCode) {
-      throw new ApiError(400, 'A valid country code is required for international shipping');
-    }
-
-    return this.resolveInternationalShippingQuote(subtotal, orderItems, shippingAddress);
+  /**
+   * International checkout/payment — fixed INR slabs by country + weight only.
+   * Never calls Shiprocket (admin uses Shiprocket when creating shipment).
+   */
+  private resolveInternationalSlabShippingForCheckout(
+    orderItems: Array<{ quantity: number; weight: number | null }>,
+    shippingAddress: Partial<ShippingAddress>,
+  ) {
+    const quote = this.resolveCheckoutInternationalShippingQuote(orderItems, shippingAddress);
+    return {
+      courier: quote.courier,
+      shippingFee: quote.shippingFee,
+      estimatedDays: quote.estimatedDays,
+      currency: quote.currency,
+      weightKg: quote.weightKg,
+    };
   }
 
   private resolveCheckoutInternationalShippingQuote(
@@ -3814,21 +3835,6 @@ export class OrderService {
     }
 
     return quote;
-  }
-
-  private async resolveInternationalShippingQuote(
-    subtotal: number,
-    orderItems: Array<{
-      quantity: number;
-      weight: number | null;
-      length?: number | null;
-      width?: number | null;
-      height?: number | null;
-    }>,
-    shippingAddress: Partial<ShippingAddress>,
-  ) {
-    void subtotal;
-    return this.resolveCheckoutInternationalShippingQuote(orderItems, shippingAddress);
   }
 
   private computePackageDimensionsFromItems(
