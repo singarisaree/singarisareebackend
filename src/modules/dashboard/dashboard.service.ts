@@ -11,6 +11,7 @@ import { settingsService } from '@/modules/settings/settings.service';
 import { ApiError, buildPaginationMeta } from '@/shared/api-response';
 import { OrderStatus, Prisma, ReturnRequestStatus } from '@prisma/client';
 import { parsePagination, parseCreatedAtFilter } from '@/utils/helpers';
+import { buildOrderDeliveryTypeFilter } from '@/utils/order-delivery-type-filter';
 import { logger } from '@/utils/logger';
 import { withCache, invalidateCache } from '@/utils/memory-cache';
 import { realtime } from '@/realtime/emitter';
@@ -255,36 +256,7 @@ export class ShippingService {
   private static readonly CANCELLATION_SYNC_COOLDOWN_MS = 45_000;
 
   private buildDeliveryTypeFilter(deliveryType?: string): Prisma.OrderWhereInput | null {
-    const type = (deliveryType || 'ALL').toUpperCase();
-    if (type === 'ALL') return null;
-
-    const indiaAddressFilter: Prisma.OrderWhereInput = {
-      OR: [
-        { shippingAddress: { path: ['countryCode'], equals: 'IN' } },
-        { shippingAddress: { path: ['country'], equals: 'India' } },
-        { shippingAddress: { path: ['country'], equals: 'india' } },
-        { shippingAddress: { path: ['country'], equals: 'IN' } },
-      ],
-    };
-    // Prisma JSON NOT equals misses rows without the key — match STANDARD / null instead.
-    const nonQuickShippingFilter: Prisma.OrderWhereInput = {
-      OR: [
-        { shippingAddress: { path: ['preferredShipping'], equals: Prisma.DbNull } },
-        { shippingAddress: { path: ['preferredShipping'], equals: Prisma.JsonNull } },
-        { shippingAddress: { path: ['preferredShipping'], equals: 'STANDARD' } },
-      ],
-    };
-
-    if (type === 'QUICK') {
-      return { shippingAddress: { path: ['preferredShipping'], equals: 'QUICK' } };
-    }
-    if (type === 'INDIA') {
-      return { AND: [indiaAddressFilter, nonQuickShippingFilter] };
-    }
-    if (type === 'INTERNATIONAL') {
-      return { AND: [nonQuickShippingFilter, { NOT: indiaAddressFilter }] };
-    }
-    return null;
+    return buildOrderDeliveryTypeFilter(deliveryType);
   }
 
   private buildDispatchOrderWhere(

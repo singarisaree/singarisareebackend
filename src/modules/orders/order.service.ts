@@ -11,6 +11,7 @@ import {
   formatCurrency,
 } from '@/utils/helpers';
 import { parseEstimatedDeliveryDays } from '@/utils/delivery-estimate';
+import { buildOrderDeliveryTypeFilter } from '@/utils/order-delivery-type-filter';
 import { buildPaginationMeta } from '@/shared/api-response';
 import { razorpayService } from '@/integrations/razorpay.service';
 import { shiprocketService } from '@/integrations/shiprocket.service';
@@ -185,6 +186,7 @@ function normalizeCustomerPhone(phone: string): string {
 function parseQuickEtaDurationMs(estimatedDays: string | null | undefined): number {
   const raw = String(estimatedDays ?? '').trim();
   if (!raw) return 60 * 60 * 1000; // default 1 hour
+  if (/same.?day|today/i.test(raw)) return 60 * 60 * 1000;
   if (/^\d+$/.test(raw)) {
     const mins = Number(raw);
     return Number.isFinite(mins) && mins > 0 ? mins * 60_000 : 60 * 60 * 1000;
@@ -827,7 +829,7 @@ export class OrderService {
         return {
           available: true,
           rate: 0,
-          etaMinutes: 'same day',
+          etaMinutes: '60 min',
           currency: 'INR',
           courierName: 'Shiprocket Quick',
         };
@@ -1926,36 +1928,9 @@ export class OrderService {
       andFilters.push({ OR: searchOr });
     }
 
-    const deliveryType = (query.deliveryType || 'ALL').toUpperCase();
-    const indiaAddressFilter: Prisma.OrderWhereInput = {
-      OR: [
-        { shippingAddress: { path: ['countryCode'], equals: 'IN' } },
-        { shippingAddress: { path: ['country'], equals: 'India' } },
-        { shippingAddress: { path: ['country'], equals: 'india' } },
-        { shippingAddress: { path: ['country'], equals: 'IN' } },
-      ],
-    };
-    // Prisma JSON NOT equals misses rows without the key — match STANDARD / null instead.
-    const nonQuickShippingFilter: Prisma.OrderWhereInput = {
-      OR: [
-        { shippingAddress: { path: ['preferredShipping'], equals: Prisma.DbNull } },
-        { shippingAddress: { path: ['preferredShipping'], equals: Prisma.JsonNull } },
-        { shippingAddress: { path: ['preferredShipping'], equals: 'STANDARD' } },
-      ],
-    };
-
-    if (deliveryType === 'QUICK') {
-      andFilters.push({
-        shippingAddress: { path: ['preferredShipping'], equals: 'QUICK' },
-      });
-    } else if (deliveryType === 'INDIA') {
-      andFilters.push({
-        AND: [indiaAddressFilter, nonQuickShippingFilter],
-      });
-    } else if (deliveryType === 'INTERNATIONAL') {
-      andFilters.push({
-        AND: [nonQuickShippingFilter, { NOT: indiaAddressFilter }],
-      });
+    const deliveryFilter = buildOrderDeliveryTypeFilter(query.deliveryType);
+    if (deliveryFilter) {
+      andFilters.push(deliveryFilter);
     }
 
     const createdAt = parseCreatedAtFilter(query);
@@ -3720,7 +3695,7 @@ export class OrderService {
         return {
           courier: 'Shiprocket Quick',
           shippingFee: 0,
-          estimatedDays: 'same day',
+          estimatedDays: '60 min',
           currency: 'INR',
         };
       }
@@ -3748,7 +3723,7 @@ export class OrderService {
           ? /^\d+$/.test(String(quick.etaMinutes).trim())
             ? `${quick.etaMinutes} min`
             : String(quick.etaMinutes)
-          : 'same day';
+          : '60 min';
 
         return {
           courier: quick.courierName || 'Shiprocket Quick',

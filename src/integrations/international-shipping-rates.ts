@@ -49,6 +49,41 @@ export const INTERNATIONAL_SHIPPING_RATES: Record<string, InternationalWeightSla
   ZA: { w05: 1999, w1: 2499, w15: 3099, w2: 3699, extraPerHalfKg: 600 },
 };
 
+export const INTERNATIONAL_COUNTRY_CODES = Object.keys(INTERNATIONAL_SHIPPING_RATES);
+
+/** Must match checkout country names (listShippingCountries). */
+export const INTERNATIONAL_COUNTRY_NAMES = [
+  'United States',
+  'Canada',
+  'United Kingdom',
+  'Australia',
+  'New Zealand',
+  'United Arab Emirates',
+  'Saudi Arabia',
+  'Qatar',
+  'Kuwait',
+  'Singapore',
+  'Malaysia',
+  'Japan',
+  'South Korea',
+  'Hong Kong',
+  'Thailand',
+  'Indonesia',
+  'Vietnam',
+  'Germany',
+  'France',
+  'Netherlands',
+  'Italy',
+  'Switzerland',
+  'Belgium',
+  'Sweden',
+  'Norway',
+  'Denmark',
+  'Finland',
+  'Austria',
+  'South Africa',
+] as const;
+
 export const CHECKOUT_INTERNATIONAL_COURIER_LABEL = 'International shipping';
 
 /** Business-day range shown at checkout (e.g. "7-12" → "7–12 Business Days" in UI). */
