@@ -49,6 +49,9 @@ interface ShippingAddress {
   selectedCourier?: string;
   /** For international orders — estimated delivery days */
   selectedCourierEta?: string;
+  /** For international orders — shipping fee for selected courier */
+  selectedShippingFee?: number;
+  selectedCourierCompanyId?: number;
 }
 
 const SUCCESSFUL_ORDER_STATUSES = new Set<OrderStatus>([
@@ -652,6 +655,9 @@ export class OrderService {
         shippingFee: shippingQuote.shippingFee,
         estimatedDays: shippingQuote.estimatedDays,
         currency: shippingQuote.currency,
+        ...(shippingQuote.courierCompanyId != null
+          ? { courierCompanyId: shippingQuote.courierCompanyId }
+          : {}),
       },
     };
   }
@@ -670,6 +676,13 @@ export class OrderService {
         shippingFee: number;
         estimatedDays: string;
         currency: string;
+        options?: Array<{
+          courier: string;
+          shippingFee: number;
+          estimatedDays: string;
+          currency: string;
+          courierCompanyId?: number;
+        }>;
       }
     | { success: false; message: string }
   > {
@@ -716,13 +729,29 @@ export class OrderService {
       }
 
       const settings = await this.getShippingSettings();
-      // Quote endpoint always returns standard rates for India; Quick is separate
-      const quote = await this.resolveShippingQuote(
-        subtotal,
-        orderItems,
-        { ...shippingAddress, preferredShipping: 'STANDARD' },
-        settings,
-      );
+      const address = { ...shippingAddress, preferredShipping: 'STANDARD' as const };
+
+      if (!this.isIndiaShippingAddress(address)) {
+        const payload = this.buildShiprocketRatePayload(subtotal, orderItems, address);
+        const options = await shiprocketService.listInternationalShippingQuotes(payload);
+        const first = options[0];
+        return {
+          success: true,
+          courier: first.courier,
+          shippingFee: first.shippingFee,
+          estimatedDays: first.estimatedDays,
+          currency: first.currency,
+          options: options.map((o) => ({
+            courier: o.courier,
+            shippingFee: o.shippingFee,
+            estimatedDays: o.estimatedDays,
+            currency: o.currency,
+            ...(o.courierCompanyId != null ? { courierCompanyId: o.courierCompanyId } : {}),
+          })),
+        };
+      }
+
+      const quote = await this.resolveShippingQuote(subtotal, orderItems, address, settings);
       return {
         success: true,
         courier: quote.courier,
@@ -961,6 +990,20 @@ export class OrderService {
     }
 
     const shippingAddress = geocodingService.resolveCoordinatesForCheckout(data.shippingAddress);
+    const quoteCompanyId =
+      totals.shippingQuote &&
+      'courierCompanyId' in totals.shippingQuote &&
+      totals.shippingQuote.courierCompanyId != null
+        ? totals.shippingQuote.courierCompanyId
+        : undefined;
+    const shippingAddressForOrder: ShippingAddress = {
+      ...(shippingAddress as ShippingAddress),
+      ...(quoteCompanyId != null
+        ? { selectedCourierCompanyId: quoteCompanyId }
+        : data.shippingAddress.selectedCourierCompanyId != null
+          ? { selectedCourierCompanyId: data.shippingAddress.selectedCourierCompanyId }
+          : {}),
+    };
     const isFreeCheckout = totals.grandTotal <= 0;
     const serverTotal = Math.round(totals.grandTotal * 100) / 100;
 
@@ -988,7 +1031,7 @@ export class OrderService {
           customerName: data.customerName,
           customerEmail: data.customerEmail,
           customerPhone: normalizeCustomerPhone(data.customerPhone),
-          shippingAddress: shippingAddress as unknown as Prisma.InputJsonValue,
+          shippingAddress: shippingAddressForOrder as unknown as Prisma.InputJsonValue,
           subtotal: totals.subtotal,
           discountAmount: totals.discountAmount,
           shippingCharge: totals.shippingCharge,
@@ -3612,6 +3655,7 @@ export class OrderService {
     shippingFee: number;
     estimatedDays: string;
     currency: string;
+    courierCompanyId?: number;
   }> {
     const shippingSettings = settings ?? (await this.getShippingSettings());
     const preferredShipping = String(shippingAddress?.preferredShipping || '')
@@ -3735,11 +3779,25 @@ export class OrderService {
       throw new ApiError(400, 'A valid country code is required for international shipping');
     }
 
+    return this.resolveInternationalShippingQuote(subtotal, orderItems, shippingAddress);
+  }
+
+  private buildShiprocketRatePayload(
+    subtotal: number,
+    orderItems: Array<{
+      quantity: number;
+      weight: number | null;
+      length?: number | null;
+      width?: number | null;
+      height?: number | null;
+    }>,
+    shippingAddress: Partial<ShippingAddress>,
+  ) {
+    const countryCode = this.resolveCountryCode(shippingAddress);
     const totalWeightGrams = orderItems.reduce(
       (sum, item) => sum + (item.weight != null ? item.weight * item.quantity : 0),
       0,
     );
-    // Product weights are stored in grams
     const weightKg = Math.max(totalWeightGrams / 1000, 0.5);
 
     let maxLength = 0;
@@ -3751,15 +3809,60 @@ export class OrderService {
       if (item.height != null) totalHeight += item.height * item.quantity;
     }
 
-    return shiprocketService.getShippingQuote({
-      deliveryPostalCode: shippingAddress.postalCode,
+    return {
+      deliveryPostalCode: shippingAddress.postalCode!,
       deliveryCountryCode: countryCode,
       weightKg,
       declaredValue: subtotal,
       lengthCm: maxLength > 0 ? maxLength : 10,
       breadthCm: maxWidth > 0 ? maxWidth : 10,
       heightCm: totalHeight > 0 ? totalHeight : 5,
-    });
+    };
+  }
+
+  private async resolveInternationalShippingQuote(
+    subtotal: number,
+    orderItems: Array<{
+      quantity: number;
+      weight: number | null;
+      length?: number | null;
+      width?: number | null;
+      height?: number | null;
+    }>,
+    shippingAddress: Partial<ShippingAddress>,
+  ) {
+    const payload = this.buildShiprocketRatePayload(subtotal, orderItems, shippingAddress);
+    const options = await shiprocketService.listInternationalShippingQuotes(payload);
+    if (!options.length) {
+      throw new ApiError(400, 'Delivery is not available for this location.');
+    }
+
+    const selected = shippingAddress.selectedCourier?.trim();
+    if (selected) {
+      const match = options.find(
+        (o) => o.courier.trim().toLowerCase() === selected.toLowerCase(),
+      );
+      if (!match) {
+        throw new ApiError(
+          400,
+          'Selected courier is no longer available. Please choose shipping again.',
+        );
+      }
+      const expectedFee = shippingAddress.selectedShippingFee;
+      if (
+        expectedFee != null &&
+        Number.isFinite(expectedFee) &&
+        Math.abs(match.shippingFee - expectedFee) > 0.02
+      ) {
+        throw new ApiError(
+          400,
+          'Shipping price changed. Please review courier options and try again.',
+        );
+      }
+      return match;
+    }
+
+    return options[0];
   }
 
   private computePackageDimensionsFromItems(

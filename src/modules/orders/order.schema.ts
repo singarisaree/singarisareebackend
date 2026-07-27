@@ -22,6 +22,9 @@ const addressSchema = z.object({
   selectedCourier: z.string().optional(),
   /** International orders — ETA in days */
   selectedCourierEta: z.string().optional(),
+  selectedShippingFee: z.number().min(0).optional(),
+  /** Shiprocket X courier_company_id from checkout quote */
+  selectedCourierCompanyId: z.number().int().positive().optional(),
 });
 
 function isIndiaAddress(address: { country?: string; countryCode?: string }): boolean {
@@ -66,6 +69,23 @@ export const checkoutSchema = checkoutBaseSchema.superRefine((data, ctx) => {
       path: ['customerPhone'],
       message: 'Enter a valid phone number with country code',
     });
+  }
+
+  if (!isIndiaAddress(data.shippingAddress)) {
+    if (!data.shippingAddress.selectedCourier?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['shippingAddress', 'selectedCourier'],
+        message: 'Select an international courier',
+      });
+    }
+    if (data.shippingAddress.selectedShippingFee == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['shippingAddress', 'selectedShippingFee'],
+        message: 'Select an international courier',
+      });
+    }
   }
 });
 

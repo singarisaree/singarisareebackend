@@ -300,20 +300,27 @@ router.get(
       city?: string;
       landmark?: string;
       state?: string;
+      selectedCourier?: string;
+      selectedCourierEta?: string;
     };
     const preferred = String(address.preferredShipping || '').toUpperCase();
+    const code = String(address.countryCode || '').trim().toUpperCase();
+    const country = String(address.country || '').trim().toLowerCase();
+    const pin = String(address.postalCode || '').trim();
+    const isIndia =
+      code === 'IN' ||
+      country === 'india' ||
+      country === 'in' ||
+      (!code && !country && /^\d{6}$/.test(pin.replace(/\D/g, '')));
+
     let deliveryType: 'QUICK' | 'INDIA' | 'INTERNATIONAL' = 'INDIA';
-    if (preferred === 'QUICK') {
+    if (!isIndia) {
+      deliveryType = 'INTERNATIONAL';
+    } else if (preferred === 'QUICK') {
       deliveryType = 'QUICK';
-    } else {
-      const code = String(address.countryCode || '').trim().toUpperCase();
-      const country = String(address.country || '').trim().toLowerCase();
-      const isIndia =
-        code === 'IN' || country === 'india' || country === 'in' || /^\d{6}$/.test(String(address.postalCode || '').trim());
-      deliveryType = isIndia ? 'INDIA' : 'INTERNATIONAL';
     }
 
-    const pin = String(address.postalCode || '').replace(/\D/g, '');
+    const pinDigits = pin.replace(/\D/g, '');
     const haystack = [address.city, address.landmark, address.state]
       .map((part) => String(part || '').trim().toLowerCase())
       .join(' ');
@@ -329,7 +336,7 @@ router.get(
     ];
     const isHyderabadDelivery =
       deliveryType === 'INDIA' &&
-      (/^500\d{3}$/.test(pin) || hyderabadMarkers.some((m) => haystack.includes(m)));
+      (/^500\d{3}$/.test(pinDigits) || hyderabadMarkers.some((m) => haystack.includes(m)));
 
     let estimatedDelivery = order.estimatedDelivery;
     if (isHyderabadDelivery) {
@@ -345,6 +352,17 @@ router.get(
       estimatedDelivery,
       deliveryType,
       isHyderabadDelivery,
+      shippingAddress: {
+        country: address.country,
+        countryCode: address.countryCode,
+        preferredShipping: address.preferredShipping,
+        selectedCourier: address.selectedCourier,
+        selectedCourierEta: address.selectedCourierEta,
+        city: address.city,
+        postalCode: address.postalCode,
+        landmark: address.landmark,
+        state: address.state,
+      },
     }, 'Payment status');
   }),
 );

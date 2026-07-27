@@ -1,6 +1,6 @@
 import { prisma } from '@/config/database';
 import { env } from '@/config/env';
-import { shiprocketService, type ShiprocketShippingMode, generateHyperlocalOtps } from '@/integrations/shiprocket.service';
+import { shiprocketService, type ShiprocketCourierOption, type ShiprocketShippingMode, generateHyperlocalOtps } from '@/integrations/shiprocket.service';
 import {
   canApplyShiprocketFulfillmentStatus,
   mapShiprocketPayloadToOrderStatus,
@@ -619,11 +619,12 @@ export class ShippingService {
               },
             ];
 
-      return { mode: resolvedMode, couriers };
+      return this.wrapCourierListResult(resolvedMode, couriers, order.shippingAddress);
     }
 
     if (resolvedMode === 'international') {
       const countryCode = this.resolveCountryCode(address);
+      const srOrderId = order.shipping?.shiprocketOrderId;
       const couriers = await shiprocketService.getInternationalCouriers({
         deliveryPostalCode: postalCode,
         weightKg,
@@ -632,11 +633,12 @@ export class ShippingService {
         lengthCm: packageDims.length,
         breadthCm: packageDims.width,
         heightCm: packageDims.height,
+        ...(srOrderId ? { shiprocketOrderId: srOrderId } : {}),
       });
       if (couriers.length === 0) {
         throw new ApiError(400, 'No international courier partners available for this destination');
       }
-      return { mode: resolvedMode, couriers };
+      return this.wrapCourierListResult(resolvedMode, couriers, order.shippingAddress);
     }
 
     const couriers = await shiprocketService.getAvailableCouriers({
@@ -649,7 +651,7 @@ export class ShippingService {
       throw new ApiError(400, 'No courier partners available for this delivery pincode');
     }
 
-    return { mode: resolvedMode, couriers };
+    return this.wrapCourierListResult(resolvedMode, couriers, order.shippingAddress);
   }
 
   async createShiprocketOrder(
@@ -1108,12 +1110,37 @@ export class ShippingService {
     const awbCode =
       (typeof awbData.awb_code === 'string' && awbData.awb_code) ||
       (typeof awbResult.awb_code === 'string' && (awbResult.awb_code as string)) ||
+      (typeof shiprocketOrder.awb_code === 'string' && shiprocketOrder.awb_code) ||
       null;
     const courierName =
       options.courierName?.trim() ||
       (typeof awbData.courier_name === 'string' && awbData.courier_name) ||
       (typeof awbData.courier_company_name === 'string' && awbData.courier_company_name) ||
+      (typeof shiprocketOrder.courier_name === 'string' && shiprocketOrder.courier_name) ||
       null;
+
+    try {
+      await shiprocketService.generatePickup([shipmentId], pickupDate);
+    } catch (error) {
+      const message =
+        error instanceof ApiError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : '';
+      if (!/duplicate request for pickup/i.test(message)) {
+        if (error instanceof ApiError) {
+          throw new ApiError(
+            error.statusCode,
+            `International AWB assigned but pickup scheduling failed: ${error.message}. Retry from admin if needed.`,
+          );
+        }
+        throw new ApiError(
+          502,
+          'International AWB assigned but pickup scheduling failed. Retry from admin if needed.',
+        );
+      }
+    }
 
     const shipping = await prisma.shipping.update({
       where: { orderId },
@@ -1472,9 +1499,12 @@ export class ShippingService {
       });
 
       try {
-        const { couriers } = await this.listAvailableCouriers(orderId);
-        const cheapest = couriers[0];
-        if (!cheapest) {
+        const { couriers, defaultCourierId } = await this.listAvailableCouriers(orderId);
+        const picked =
+          (defaultCourierId != null
+            ? couriers.find((c) => c.courierId === defaultCourierId)
+            : null) ?? couriers[0];
+        if (!picked) {
           quotes.push({
             orderId,
             orderNumber: order?.orderNumber ?? null,
@@ -1490,10 +1520,10 @@ export class ShippingService {
         quotes.push({
           orderId,
           orderNumber: order?.orderNumber ?? null,
-          courierId: cheapest.courierId,
-          courierName: cheapest.courierName,
-          rate: cheapest.rate,
-          etd: cheapest.etd,
+          courierId: picked.courierId,
+          courierName: picked.courierName,
+          rate: picked.rate,
+          etd: picked.etd,
           error: null,
         });
       } catch (error) {
@@ -2203,6 +2233,9 @@ export class ShippingService {
     latitude?: number;
     longitude?: number;
     preferredShipping?: 'QUICK' | 'STANDARD';
+    selectedCourier?: string;
+    selectedCourierEta?: string;
+    selectedCourierCompanyId?: number;
   } {
     const address = (raw ?? {}) as Record<string, unknown>;
     const preferredRaw = String(address.preferredShipping ?? '').toUpperCase();
@@ -2228,6 +2261,55 @@ export class ShippingService {
           ? Number(address.longitude)
           : undefined,
       preferredShipping,
+      selectedCourier: address.selectedCourier ? String(address.selectedCourier) : undefined,
+      selectedCourierEta: address.selectedCourierEta
+        ? String(address.selectedCourierEta)
+        : undefined,
+      selectedCourierCompanyId:
+        address.selectedCourierCompanyId != null &&
+        Number.isFinite(Number(address.selectedCourierCompanyId))
+          ? Number(address.selectedCourierCompanyId)
+          : undefined,
+    };
+  }
+
+  private resolveDefaultCourierId(
+    couriers: Array<{ courierId: number; courierName: string }>,
+    shippingAddress: Prisma.JsonValue | null,
+  ): number | null {
+    if (!couriers.length) return null;
+    const address = (shippingAddress ?? {}) as Record<string, unknown>;
+    const companyId = Number(address.selectedCourierCompanyId);
+    if (Number.isFinite(companyId) && companyId > 0) {
+      const byId = couriers.find((c) => c.courierId === companyId);
+      if (byId) return byId.courierId;
+    }
+    const selectedName = String(address.selectedCourier || '')
+      .trim()
+      .toLowerCase();
+    if (selectedName) {
+      const exact = couriers.find(
+        (c) => c.courierName.trim().toLowerCase() === selectedName,
+      );
+      if (exact) return exact.courierId;
+      const fuzzy = couriers.find((c) => {
+        const n = c.courierName.trim().toLowerCase();
+        return n.includes(selectedName) || selectedName.includes(n);
+      });
+      if (fuzzy) return fuzzy.courierId;
+    }
+    return couriers[0]?.courierId ?? null;
+  }
+
+  private wrapCourierListResult(
+    mode: ShiprocketShippingMode,
+    couriers: ShiprocketCourierOption[],
+    shippingAddress: Prisma.JsonValue | null,
+  ) {
+    return {
+      mode,
+      couriers,
+      defaultCourierId: this.resolveDefaultCourierId(couriers, shippingAddress),
     };
   }
 
@@ -2318,6 +2400,7 @@ export class ShippingService {
       customerEmail: string;
       customerPhone: string;
       subtotal: Prisma.Decimal;
+      shippingCharge: Prisma.Decimal;
       items: Array<{
         productName: string;
         sku: string;
@@ -2334,6 +2417,8 @@ export class ShippingService {
     },
     address: {
       addressLine1: string;
+      addressLine2?: string;
+      landmark?: string;
       city: string;
       state: string;
       postalCode: string;
@@ -2344,38 +2429,49 @@ export class ShippingService {
     orderRef: string,
     options?: { international?: boolean; countryCode?: string },
   ) {
-    const nameParts = order.customerName.split(' ');
+    const nameParts = order.customerName.trim().split(/\s+/);
+    const firstName = nameParts[0] || 'Customer';
+    const lastName = nameParts.slice(1).join(' ') || '.';
     const packageDims = this.resolveOrderPackageDimensions(order);
     const totalWeightKg = this.resolveOrderWeightKg(order);
     const countryCode = options?.countryCode?.trim().toUpperCase();
+    const phoneDigits = order.customerPhone.replace(/\D/g, '');
+    const shippingAddressLine = [address.addressLine1, address.addressLine2, address.landmark]
+      .filter((part) => part && String(part).trim())
+      .join(', ');
+
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const created = order.createdAt;
+    const orderDate = `${created.getFullYear()}-${pad(created.getMonth() + 1)}-${pad(created.getDate())} ${pad(created.getHours())}:${pad(created.getMinutes())}`;
 
     const payload: Record<string, unknown> = {
       order_id: orderRef,
-      order_date: order.createdAt.toISOString().split('T')[0],
+      order_date: orderDate,
       pickup_location: env.SHIPROCKET_PICKUP_LOCATION || 'Primary',
-      billing_customer_name: nameParts[0],
-      billing_last_name: nameParts.slice(1).join(' ') || '.',
+      billing_customer_name: firstName,
+      billing_last_name: lastName,
       billing_address: address.addressLine1,
+      billing_address_2: address.addressLine2 || '',
       billing_city: address.city,
       billing_pincode: address.postalCode,
       billing_state: address.state,
-      billing_country: options?.international
-        ? countryCode || address.country
-        : address.country || 'India',
+      billing_country: address.country || 'India',
       billing_email: order.customerEmail,
-      billing_phone: order.customerPhone,
-      shipping_is_billing: true,
+      billing_phone: phoneDigits || order.customerPhone,
+      shipping_is_billing: 1,
       order_items: order.items.map((item) => ({
         name: item.productName,
         sku: item.sku,
         units: item.quantity,
-        selling_price: Number(item.unitPrice),
-        discount: 0,
-        tax: 0,
+        selling_price: String(Number(item.unitPrice)),
+        discount: '',
+        tax: '',
         hsn: 5208,
+        category_name: 'Sarees',
       })),
       payment_method: 'Prepaid',
       sub_total: Number(order.subtotal),
+      shipping_charges: Number(order.shippingCharge) || 0,
       length: packageDims.length,
       breadth: packageDims.width,
       height: packageDims.height,
@@ -2383,9 +2479,36 @@ export class ShippingService {
     };
 
     if (options?.international) {
-      payload.shipping_country = countryCode || address.country;
+      const shippingCountry =
+        address.country?.trim() || countryCode || 'International';
+      payload.billing_country = 'India';
+      payload.billing_pincode = env.SHIPROCKET_PICKUP_PINCODE;
+      payload.billing_state = 'Telangana';
+      payload.billing_city = 'Hyderabad';
+      payload.billing_address =
+        env.SHIPROCKET_PICKUP_LOCATION || 'Singari Sarees — Primary pickup';
+      payload.shipping_is_billing = 0;
+      payload.shipping_customer_name = firstName;
+      payload.shipping_last_name = lastName;
+      payload.shipping_address = shippingAddressLine || address.addressLine1;
+      payload.shipping_address_2 = '';
+      payload.shipping_city = address.city;
+      payload.shipping_state = address.state;
+      payload.shipping_country = shippingCountry;
+      payload.shipping_pincode = address.postalCode;
+      payload.shipping_email = order.customerEmail;
+      payload.shipping_phone = phoneDigits || order.customerPhone;
+      payload.order_type = 1;
       payload.currency = 'INR';
-      payload.purpose_of_shipment = 0;
+      payload.purpose_of_shipment = 2;
+      payload.reasonOfExport = 3;
+      payload.igstPaymentStatus = 'A';
+      payload.Terms_Of_Invoice = 'FOB';
+      payload.payment_method = 'PREPAID';
+      payload.commodity = true;
+      payload.mies = true;
+      payload.is_order_revamp = 1;
+      payload.is_document = 0;
     }
     if (address.latitude != null && address.longitude != null) {
       payload.latitude = address.latitude;
