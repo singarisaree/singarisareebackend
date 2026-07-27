@@ -45,6 +45,10 @@ interface ShippingAddress {
   latitude?: number;
   longitude?: number;
   preferredShipping?: 'QUICK' | 'STANDARD';
+  /** For international orders — courier name selected at checkout */
+  selectedCourier?: string;
+  /** For international orders — estimated delivery days */
+  selectedCourierEta?: string;
 }
 
 const SUCCESSFUL_ORDER_STATUSES = new Set<OrderStatus>([
@@ -611,7 +615,7 @@ export class OrderService {
       Math.round((subtotal - discountAmount + shippingCharge + taxAmount) * 100) / 100,
     );
 
-    const isQuick = shippingAddress?.preferredShipping === 'QUICK';
+    const isQuick = String(shippingAddress?.preferredShipping || '').toUpperCase() === 'QUICK';
     const isInternational =
       !isQuick && shippingAddress != null && !this.isIndiaShippingAddress(shippingAddress);
 
@@ -772,6 +776,17 @@ export class OrderService {
         };
       }
 
+      const freeInstant = await settingsService.isQuickInstantDeliveryFree();
+      if (freeInstant) {
+        return {
+          available: true,
+          rate: 0,
+          etaMinutes: 'same day',
+          currency: 'INR',
+          courierName: 'Shiprocket Quick',
+        };
+      }
+
       const byColorId = await this.loadCheckoutProductsByColor(items);
       let subtotal = 0;
       let totalWeightGrams = 0;
@@ -808,10 +823,9 @@ export class OrderService {
         return { available: false, message: CUSTOMER_QUICK_UNAVAILABLE };
       }
 
-      const freeInstant = await settingsService.isQuickInstantDeliveryFree();
       return {
         available: true,
-        rate: freeInstant ? 0 : quote.rate,
+        rate: quote.rate,
         etaMinutes: quote.etaMinutes,
         currency: quote.currency,
         courierName: quote.courierName,
@@ -840,9 +854,39 @@ export class OrderService {
   }
 
   async listShippingCountries() {
-    return withCache('shiprocket:countries', 6 * 60 * 60 * 1000, () =>
-      shiprocketService.getCountries(),
-    );
+    // Fixed allowed list — no Shiprocket API call needed.
+    return [
+      { name: 'India',                 isoCode: 'IN', dialCode: '+91',  postcodeRequired: true,  postalRegex: '^(\\d{6})$' },
+      { name: 'United States',         isoCode: 'US', dialCode: '+1',   postcodeRequired: true,  postalRegex: '^(\\d{5})(-\\d{4})?$' },
+      { name: 'Canada',                isoCode: 'CA', dialCode: '+1',   postcodeRequired: true,  postalRegex: '^[A-Z]\\d[A-Z]\\s*\\d[A-Z]\\d$' },
+      { name: 'United Kingdom',        isoCode: 'GB', dialCode: '+44',  postcodeRequired: true,  postalRegex: '^[A-Z]{1,2}\\d[A-Z\\d]?\\s*\\d[A-Z]{2}$' },
+      { name: 'Australia',             isoCode: 'AU', dialCode: '+61',  postcodeRequired: true,  postalRegex: '^(\\d{4})$' },
+      { name: 'New Zealand',           isoCode: 'NZ', dialCode: '+64',  postcodeRequired: true,  postalRegex: '^(\\d{4})$' },
+      { name: 'United Arab Emirates',  isoCode: 'AE', dialCode: '+971', postcodeRequired: true,  postalRegex: '^(\\d{5})$' },
+      { name: 'Saudi Arabia',          isoCode: 'SA', dialCode: '+966', postcodeRequired: true,  postalRegex: '^(\\d{5})$' },
+      { name: 'Qatar',                 isoCode: 'QA', dialCode: '+974', postcodeRequired: true,  postalRegex: '^(\\d{5})$' },
+      { name: 'Kuwait',                isoCode: 'KW', dialCode: '+965', postcodeRequired: true,  postalRegex: '^(\\d{5})$' },
+      { name: 'Singapore',             isoCode: 'SG', dialCode: '+65',  postcodeRequired: true,  postalRegex: '^(\\d{6})$' },
+      { name: 'Malaysia',              isoCode: 'MY', dialCode: '+60',  postcodeRequired: true,  postalRegex: '^(\\d{5})$' },
+      { name: 'Japan',                 isoCode: 'JP', dialCode: '+81',  postcodeRequired: true,  postalRegex: '^\\d{3}-?\\d{4}$' },
+      { name: 'South Korea',           isoCode: 'KR', dialCode: '+82',  postcodeRequired: true,  postalRegex: '^(\\d{5})$' },
+      { name: 'Hong Kong',             isoCode: 'HK', dialCode: '+852', postcodeRequired: true,  postalRegex: null },
+      { name: 'Thailand',              isoCode: 'TH', dialCode: '+66',  postcodeRequired: true,  postalRegex: '^(\\d{5})$' },
+      { name: 'Indonesia',             isoCode: 'ID', dialCode: '+62',  postcodeRequired: true,  postalRegex: '^(\\d{5})$' },
+      { name: 'Vietnam',               isoCode: 'VN', dialCode: '+84',  postcodeRequired: true,  postalRegex: '^(\\d{6})$' },
+      { name: 'Germany',               isoCode: 'DE', dialCode: '+49',  postcodeRequired: true,  postalRegex: '^(\\d{5})$' },
+      { name: 'France',                isoCode: 'FR', dialCode: '+33',  postcodeRequired: true,  postalRegex: '^(\\d{5})$' },
+      { name: 'Netherlands',           isoCode: 'NL', dialCode: '+31',  postcodeRequired: true,  postalRegex: '^\\d{4}\\s?[A-Z]{2}$' },
+      { name: 'Italy',                 isoCode: 'IT', dialCode: '+39',  postcodeRequired: true,  postalRegex: '^(\\d{5})$' },
+      { name: 'Switzerland',           isoCode: 'CH', dialCode: '+41',  postcodeRequired: true,  postalRegex: '^(\\d{4})$' },
+      { name: 'Belgium',               isoCode: 'BE', dialCode: '+32',  postcodeRequired: true,  postalRegex: '^(\\d{4})$' },
+      { name: 'Sweden',                isoCode: 'SE', dialCode: '+46',  postcodeRequired: true,  postalRegex: '^\\d{3}\\s?\\d{2}$' },
+      { name: 'Norway',                isoCode: 'NO', dialCode: '+47',  postcodeRequired: true,  postalRegex: '^(\\d{4})$' },
+      { name: 'Denmark',               isoCode: 'DK', dialCode: '+45',  postcodeRequired: true,  postalRegex: '^(\\d{4})$' },
+      { name: 'Finland',               isoCode: 'FI', dialCode: '+358', postcodeRequired: true,  postalRegex: '^(\\d{5})$' },
+      { name: 'Austria',               isoCode: 'AT', dialCode: '+43',  postcodeRequired: true,  postalRegex: '^(\\d{4})$' },
+      { name: 'South Africa',          isoCode: 'ZA', dialCode: '+27',  postcodeRequired: true,  postalRegex: '^(\\d{4})$' },
+    ];
   }
 
   async createGuestOrder(data: {
@@ -894,11 +938,13 @@ export class OrderService {
       clientTotalSafe != null ? startRazorpayFor(clientTotalSafe) : null;
 
     const totals = await totalsPromise;
-    // Authoritative Instant free: never charge Instant fee when admin enabled free Instant
-    if (
-      data.shippingAddress?.preferredShipping === 'QUICK' &&
-      totals.shippingCharge > 0
-    ) {
+    const preferredShipping = String(data.shippingAddress?.preferredShipping || '')
+      .trim()
+      .toUpperCase();
+    const wantsInstant = preferredShipping === 'QUICK';
+
+    // Authoritative Instant free — apply before Razorpay amount is finalized
+    if (wantsInstant) {
       const freeInstant = await settingsService.isQuickInstantDeliveryFree();
       if (freeInstant) {
         totals.shippingCharge = 0;
@@ -906,8 +952,14 @@ export class OrderService {
           0,
           Math.round((totals.subtotal - totals.discountAmount + totals.taxAmount) * 100) / 100,
         );
+        logger.info('Instant delivery free applied at checkout', {
+          orderNumber,
+          subtotal: totals.subtotal,
+          grandTotal: totals.grandTotal,
+        });
       }
     }
+
     const shippingAddress = geocodingService.resolveCoordinatesForCheckout(data.shippingAddress);
     const isFreeCheckout = totals.grandTotal <= 0;
     const serverTotal = Math.round(totals.grandTotal * 100) / 100;
@@ -3562,8 +3614,17 @@ export class OrderService {
     currency: string;
   }> {
     const shippingSettings = settings ?? (await this.getShippingSettings());
+    const preferredShipping = String(shippingAddress?.preferredShipping || '')
+      .trim()
+      .toUpperCase();
 
-    if (shippingAddress?.preferredShipping === 'QUICK') {
+    if (preferredShipping === 'QUICK') {
+      if (!shippingAddress) {
+        throw new ApiError(
+          400,
+          'Instant delivery requires your location. Tap Detect My Location and try again.',
+        );
+      }
       if (
         shippingAddress.latitude == null ||
         shippingAddress.longitude == null ||
@@ -3587,6 +3648,20 @@ export class OrderService {
       const schedule = await settingsService.getQuickScheduleAvailability();
       if (!schedule.available) {
         throw new ApiError(400, `${schedule.message} Choose standard delivery.`);
+      }
+
+      const freeInstant =
+        shippingSettings.instantDeliveryFree === true ||
+        (await settingsService.isQuickInstantDeliveryFree());
+
+      // Free Instant: do not depend on Shiprocket rate for the charge
+      if (freeInstant) {
+        return {
+          courier: 'Shiprocket Quick',
+          shippingFee: 0,
+          estimatedDays: 'same day',
+          currency: 'INR',
+        };
       }
 
       const totalWeightGrams = orderItems.reduce(
@@ -3614,14 +3689,9 @@ export class OrderService {
             : String(quick.etaMinutes)
           : 'same day';
 
-        // Prefer cached shipping settings (same source used at checkout payment time)
-        const freeInstant =
-          shippingSettings.instantDeliveryFree === true ||
-          (await settingsService.isQuickInstantDeliveryFree());
-
         return {
           courier: quick.courierName || 'Shiprocket Quick',
-          shippingFee: freeInstant ? 0 : quick.rate,
+          shippingFee: quick.rate,
           estimatedDays: etaLabel,
           currency: quick.currency || 'INR',
         };

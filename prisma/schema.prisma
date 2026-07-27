@@ -173,6 +173,7 @@ model Product {
   inventory  Inventory[]
   orderItems OrderItem[]
   reviews    CustomerReview[]
+  showcaseItems ShowcaseItem[]
 
   @@index([slug])
   @@index([sku])
@@ -203,6 +204,8 @@ model ProductColor {
   images     ProductImage[]
   inventory  Inventory[]
   orderItems OrderItem[]
+
+  showcaseItems ShowcaseItem[]
 
   @@index([productId])
   @@index([deletedAt])
@@ -666,6 +669,29 @@ model InstagramReel {
   @@index([sortOrder])
   @@index([createdAt])
   @@map("instagram_reels")
+}
+
+// ─── Singari Showcase (homepage product videos) ───────────────────────────────
+
+model ShowcaseItem {
+  id             String    @id @default(uuid()) @db.Uuid
+  productId      String    @map("product_id") @db.Uuid
+  productColorId String    @map("product_color_id") @db.Uuid
+  videoUrl       String    @map("video_url") @db.VarChar(500)
+  publicId       String    @map("public_id") @db.VarChar(500)
+  sortOrder      Int       @default(0) @map("sort_order")
+  isActive       Boolean   @default(true) @map("is_active")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  deletedAt      DateTime? @map("deleted_at")
+
+  product      Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productColor ProductColor @relation(fields: [productColorId], references: [id], onDelete: Cascade)
+
+  @@unique([productColorId])
+  @@index([isActive, deletedAt])
+  @@index([sortOrder])
+  @@map("showcase_items")
 }
 
 // ─── Settings ──────────────────────────────────────────────────────────────────

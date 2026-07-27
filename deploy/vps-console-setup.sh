@@ -189,7 +189,7 @@ upstream singari_api { server 127.0.0.1:5001; keepalive 32; }
 server {
     listen 80; listen [::]:80;
     server_name api.singarisaree.com;
-    client_max_body_size 15m;
+    client_max_body_size 100m;
     location /.well-known/acme-challenge/ { root /var/www/certbot; }
     location / {
         proxy_pass http://singari_api;

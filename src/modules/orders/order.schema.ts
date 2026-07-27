@@ -18,6 +18,10 @@ const addressSchema = z.object({
   latitude: z.number().min(-90).max(90).optional(),
   longitude: z.number().min(-180).max(180).optional(),
   preferredShipping: z.enum(['QUICK', 'STANDARD']).optional(),
+  /** International orders — courier chosen at checkout */
+  selectedCourier: z.string().optional(),
+  /** International orders — ETA in days */
+  selectedCourierEta: z.string().optional(),
 });
 
 function isIndiaAddress(address: { country?: string; countryCode?: string }): boolean {
@@ -78,7 +82,7 @@ export const shippingQuoteSchema = z.object({
     country: z.string().min(2),
     state: z.string().min(2),
     city: z.string().min(2),
-    postalCode: z.string().min(2),
+    postalCode: z.string().min(2).max(16),
   }),
 });
 

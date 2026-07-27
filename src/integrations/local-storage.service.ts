@@ -30,7 +30,7 @@ export interface StoredVideo {
 /** All WebP output is compressed at this quality. */
 const WEBP_QUALITY = 80;
 
-/** Target max bytes after conversion (~8 MB). */
+/** Target max bytes after conversion (~8 MB compressed reel). */
 const MAX_REEL_OUTPUT_BYTES = 8 * 1024 * 1024;
 
 /** Public URL prefix images are served under (see express.static in app.ts). */
@@ -137,27 +137,45 @@ export class LocalStorageService {
 
   /**
    * Convert uploaded video to H.264 MP4 (max ~720p), compress, and store under
-   * uploads/instagram-reels/. Falls back to storing original MP4/WebM if ffmpeg fails.
+   * uploads/instagram-reels/. Falls back to original only for MP4/WebM if ffmpeg fails.
+   * MOV always requires a successful conversion (browsers cannot play raw MOV reliably).
    */
-  async uploadVideo(buffer: Buffer, originalMime?: string): Promise<StoredVideo> {
-    const category = 'instagram-reels';
+  async uploadVideo(
+    buffer: Buffer,
+    originalMime?: string,
+    originalName?: string,
+    storageFolder = 'instagram-reels',
+  ): Promise<StoredVideo> {
+    const category = storageFolder;
     const dir = path.join(UPLOADS_DIR, category);
     await fs.mkdir(dir, { recursive: true });
 
+    const mime = (originalMime || '').toLowerCase();
+    const name = (originalName || '').toLowerCase();
+    const isMov = mime.includes('quicktime') || mime.includes('video/mov') || /\.mov$/i.test(name);
+    const isWebm = mime.includes('webm') || /\.webm$/i.test(name);
+    const isMp4 = mime.includes('mp4') || mime.includes('m4v') || /\.(mp4|m4v)$/i.test(name);
+
     let output: Buffer;
     try {
-      output = await this.convertVideoToMp4(buffer);
+      output = await this.convertVideoToMp4(buffer, { isMov, isWebm, originalName });
     } catch (error) {
       logger.warn('ffmpeg convert failed; storing original if already web-friendly', {
         error: error instanceof Error ? error.message : error,
+        mime,
+        originalName,
       });
-      const mime = (originalMime || '').toLowerCase();
-      if (mime.includes('mp4') || mime.includes('webm')) {
+      if ((isMp4 || isWebm) && buffer.byteLength <= MAX_REEL_OUTPUT_BYTES) {
         output = buffer;
+      } else if (isMp4 || isWebm) {
+        throw new ApiError(
+          400,
+          'Could not compress this video under 8 MB. Use a shorter clip.',
+        );
       } else {
         throw new ApiError(
           400,
-          'Could not convert video. Upload MP4 or WebM, or install ffmpeg on the server.',
+          'Could not convert this video. Try exporting as MP4, or install/update ffmpeg on the server.',
         );
       }
     }
@@ -169,7 +187,7 @@ export class LocalStorageService {
       );
     }
 
-    const ext = originalMime?.includes('webm') && output === buffer ? 'webm' : 'mp4';
+    const ext = isWebm && output === buffer ? 'webm' : 'mp4';
     const filename = `${randomUUID()}.${ext}`;
     const absolutePath = path.join(dir, filename);
     await fs.writeFile(absolutePath, output);
@@ -182,49 +200,106 @@ export class LocalStorageService {
     };
   }
 
-  private async convertVideoToMp4(input: Buffer): Promise<Buffer> {
+  private async convertVideoToMp4(
+    input: Buffer,
+    hints?: { isMov?: boolean; isWebm?: boolean; originalName?: string },
+  ): Promise<Buffer> {
     const ffmpegPath = typeof ffmpegStatic === 'string' ? ffmpegStatic : null;
     if (!ffmpegPath) {
       throw new Error('ffmpeg-static binary not available');
     }
 
     const id = randomUUID();
-    const tmpIn = path.join(os.tmpdir(), `ig-reel-${id}-in`);
+    const inExt = hints?.isMov
+      ? '.mov'
+      : hints?.isWebm
+        ? '.webm'
+        : hints?.originalName && /\.[a-z0-9]+$/i.test(hints.originalName)
+          ? path.extname(hints.originalName).toLowerCase()
+          : '.mp4';
+    const tmpIn = path.join(os.tmpdir(), `ig-reel-${id}-in${inExt}`);
     const tmpOut = path.join(os.tmpdir(), `ig-reel-${id}.mp4`);
 
     await fs.writeFile(tmpIn, input);
 
-    try {
-      await this.runFfmpeg(ffmpegPath, [
+    /** Escalating compression until output fits under 8 MB. */
+    const passes: Array<{ scale: string; crf: string; audio: boolean; maxSeconds: string }> = [
+      { scale: "scale='min(720,iw)':-2", crf: '28', audio: true, maxSeconds: '90' },
+      { scale: "scale='min(720,iw)':-2", crf: '32', audio: true, maxSeconds: '90' },
+      { scale: "scale='min(540,iw)':-2", crf: '34', audio: true, maxSeconds: '60' },
+      { scale: "scale='min(480,iw)':-2", crf: '36', audio: false, maxSeconds: '60' },
+    ];
+
+    const buildArgs = (pass: (typeof passes)[number], stripAudio: boolean) => {
+      const args = [
         '-y',
+        '-fflags',
+        '+genpts',
         '-i',
         tmpIn,
         '-vf',
-        "scale='min(720,iw)':-2",
+        pass.scale,
         '-c:v',
         'libx264',
         '-preset',
         'fast',
         '-crf',
-        '28',
-        '-c:a',
-        'aac',
-        '-b:a',
-        '96k',
-        '-ac',
-        '2',
+        pass.crf,
+      ];
+      if (stripAudio || !pass.audio) {
+        args.push('-an');
+      } else {
+        args.push('-c:a', 'aac', '-b:a', '64k', '-ac', '2', '-ar', '44100');
+      }
+      args.push(
         '-movflags',
         '+faststart',
         '-pix_fmt',
         'yuv420p',
         '-t',
-        '90',
+        pass.maxSeconds,
         tmpOut,
-      ]);
+      );
+      return args;
+    };
 
-      const output = await fs.readFile(tmpOut);
-      if (!output.byteLength) throw new Error('ffmpeg produced empty file');
-      return output;
+    try {
+      let lastError: unknown;
+      let best: Buffer | null = null;
+
+      for (const pass of passes) {
+        try {
+          try {
+            await this.runFfmpeg(ffmpegPath, buildArgs(pass, false));
+          } catch (firstError) {
+            if (!hints?.isMov) throw firstError;
+            logger.warn('MOV convert retry without audio', {
+              error: firstError instanceof Error ? firstError.message : firstError,
+              crf: pass.crf,
+            });
+            await this.runFfmpeg(ffmpegPath, buildArgs(pass, true));
+          }
+
+          const output = await fs.readFile(tmpOut);
+          if (!output.byteLength) throw new Error('ffmpeg produced empty file');
+
+          if (!best || output.byteLength < best.byteLength) best = output;
+          if (output.byteLength <= MAX_REEL_OUTPUT_BYTES) return output;
+
+          logger.info('Reel still over 8 MB; trying stronger compression', {
+            bytes: output.byteLength,
+            crf: pass.crf,
+            scale: pass.scale,
+          });
+        } catch (error) {
+          lastError = error;
+        }
+      }
+
+      if (best && best.byteLength <= MAX_REEL_OUTPUT_BYTES) return best;
+      if (lastError) throw lastError;
+      if (best) return best;
+      throw new Error('ffmpeg produced empty file');
     } finally {
       await Promise.all([
         fs.unlink(tmpIn).catch(() => undefined),

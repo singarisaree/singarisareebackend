@@ -52,7 +52,7 @@ server {
     ssl_session_cache shared:SSL:10m;
     ssl_session_timeout 1d;
 
-    client_max_body_size 15m;
+    client_max_body_size 100m;
 
     location /uploads/ {
         proxy_pass http://singari_api;

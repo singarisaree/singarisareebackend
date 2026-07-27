@@ -75,7 +75,11 @@ export class InstagramService {
     const instagramUrl = normalizeInstagramLink(data.instagramUrl);
     if (!instagramUrl) throw new ApiError(400, 'Invalid Instagram link');
 
-    const upload = await localStorageService.uploadVideo(file.buffer, file.mimetype);
+    const upload = await localStorageService.uploadVideo(
+      file.buffer,
+      file.mimetype,
+      file.originalname,
+    );
     const filesToDelete: string[] = [];
 
     try {
@@ -131,7 +135,11 @@ export class InstagramService {
 
     let upload: { url: string; publicId: string } | null = null;
     if (file) {
-      upload = await localStorageService.uploadVideo(file.buffer, file.mimetype);
+      upload = await localStorageService.uploadVideo(
+        file.buffer,
+        file.mimetype,
+        file.originalname,
+      );
     }
 
     let nextInstagramUrl: string | undefined;

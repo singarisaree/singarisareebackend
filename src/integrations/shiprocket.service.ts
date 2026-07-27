@@ -586,12 +586,26 @@ export class ShiprocketService {
     const courierName = String(
       company.courier_name ?? company.courier_company_name ?? company.name ?? '',
     ).trim();
-    const rate =
-      Number(company.rate) ||
-      Number(company.freight_charge) ||
-      Number(company.courier_charge) ||
-      Number(company.estimated_cost) ||
-      Number(company.total_charges);
+
+    const rateRaw = company.rate;
+    let rate =
+      typeof rateRaw === 'object' && rateRaw !== null
+        ? Number((rateRaw as Record<string, unknown>).rate)
+        : Number(rateRaw);
+    if (!Number.isFinite(rate) || rate < 0) {
+      rate =
+        Number(company.freight_charge) ||
+        Number(company.courier_charge) ||
+        Number(company.estimated_cost) ||
+        Number(company.total_charges);
+    }
+    if (!Number.isFinite(rate) || rate < 0) {
+      const extra = company.extra_charges;
+      if (Array.isArray(extra) && extra.length > 0) {
+        const first = extra[0] as Record<string, unknown>;
+        rate = Number(first.value);
+      }
+    }
     if (!courierName || !Number.isFinite(rate) || rate < 0) return null;
 
     const etdRaw = company.etd ?? company.estimated_delivery_days ?? company.edd;

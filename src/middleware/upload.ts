@@ -36,14 +36,20 @@ export const uploadAdminProductSave = multer({
 }).any();
 
 const videoFilter: multer.Options['fileFilter'] = (_req, file, cb) => {
-  const allowed = [
-    'video/mp4',
-    'video/webm',
-    'video/quicktime',
-    'video/x-m4v',
-    'video/x-msvideo',
-  ];
-  if (allowed.includes(file.mimetype) || /\.(mp4|webm|mov|m4v|avi)$/i.test(file.originalname)) {
+  const mime = (file.mimetype || '').toLowerCase();
+  const name = file.originalname || '';
+  const allowedMime =
+    mime === 'video/mp4' ||
+    mime === 'video/webm' ||
+    mime === 'video/quicktime' ||
+    mime === 'video/mov' ||
+    mime === 'video/x-m4v' ||
+    mime === 'video/x-msvideo' ||
+    // Browsers sometimes omit type or use octet-stream for MOV/WebM
+    ((mime === '' || mime === 'application/octet-stream') &&
+      /\.(mp4|webm|mov|m4v)$/i.test(name));
+
+  if (allowedMime || /\.(mp4|webm|mov|m4v)$/i.test(name)) {
     cb(null, true);
   } else {
     cb(
@@ -58,7 +64,7 @@ export const uploadInstagramReelVideo = multer({
   storage,
   fileFilter: videoFilter,
   limits: {
-    fileSize: 40 * 1024 * 1024,
+    fileSize: 100 * 1024 * 1024,
     files: 1,
   },
 }).single('video');

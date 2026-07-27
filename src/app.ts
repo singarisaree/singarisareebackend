@@ -20,6 +20,7 @@ import couponRoutes from '@/modules/coupons/coupon.routes';
 import heroBannerRoutes from '@/modules/hero-banners/hero-banner.routes';
 import reviewRoutes from '@/modules/reviews/review.routes';
 import instagramRoutes from '@/modules/instagram/instagram.routes';
+import showcaseRoutes from '@/modules/showcase/showcase.routes';
 import settingsRoutes from '@/modules/settings/settings.routes';
 import dashboardRoutes from '@/modules/dashboard/dashboard.routes';
 import fulfillmentWebhookRoutes from '@/modules/dashboard/fulfillment-webhook.routes';
@@ -161,6 +162,7 @@ export function createApp(): Application {
   app.use(`${apiPrefix}/hero-banners`, heroBannerRoutes);
   app.use(`${apiPrefix}/reviews`, reviewRoutes);
   app.use(`${apiPrefix}/instagram`, instagramRoutes);
+  app.use(`${apiPrefix}/showcase`, showcaseRoutes);
   app.use(`${apiPrefix}/settings`, settingsRoutes);
   app.use(`${apiPrefix}/dashboard`, dashboardRoutes);
   app.use(`${apiPrefix}/fulfillment`, fulfillmentWebhookRoutes);
