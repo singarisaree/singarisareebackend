@@ -825,15 +825,6 @@ export class OrderService {
       }
 
       const freeInstant = await settingsService.isQuickInstantDeliveryFree();
-      if (freeInstant) {
-        return {
-          available: true,
-          rate: 0,
-          etaMinutes: '60 min',
-          currency: 'INR',
-          courierName: 'Shiprocket Quick',
-        };
-      }
 
       const byColorId = await this.loadCheckoutProductsByColor(items);
       let subtotal = 0;
@@ -855,29 +846,56 @@ export class OrderService {
       }
 
       const weightKg = Math.max(totalWeightGrams > 0 ? totalWeightGrams / 1000 : 0.5, 0.1);
-      const quote = await shiprocketService.quoteQuickDelivery({
-        pickupPostalCode: env.SHIPROCKET_PICKUP_PINCODE,
-        deliveryPostalCode: delivery.postalCode?.trim() || '500001',
-        pickupLatitude: pickup.latitude,
-        pickupLongitude: pickup.longitude,
-        deliveryLatitude: delivery.latitude,
-        deliveryLongitude: delivery.longitude,
-        weightKg,
-        declaredValue: subtotal,
-        cod: false,
-      });
 
-      if (!Number.isFinite(quote.rate) || quote.rate < 0) {
-        return { available: false, message: CUSTOMER_QUICK_UNAVAILABLE };
+      // Always quote Shiprocket for a real ETA — even when Instant is free.
+      try {
+        const quote = await shiprocketService.quoteQuickDelivery({
+          pickupPostalCode: env.SHIPROCKET_PICKUP_PINCODE,
+          deliveryPostalCode: delivery.postalCode?.trim() || '500001',
+          pickupLatitude: pickup.latitude,
+          pickupLongitude: pickup.longitude,
+          deliveryLatitude: delivery.latitude,
+          deliveryLongitude: delivery.longitude,
+          weightKg,
+          declaredValue: subtotal,
+          cod: false,
+        });
+
+        if (!Number.isFinite(quote.rate) || quote.rate < 0) {
+          if (freeInstant) {
+            return {
+              available: true,
+              rate: 0,
+              etaMinutes: '60 min',
+              currency: 'INR',
+              courierName: 'Shiprocket Quick',
+            };
+          }
+          return { available: false, message: CUSTOMER_QUICK_UNAVAILABLE };
+        }
+
+        return {
+          available: true,
+          rate: freeInstant ? 0 : quote.rate,
+          etaMinutes: quote.etaMinutes ?? '60 min',
+          currency: quote.currency,
+          courierName: quote.courierName,
+        };
+      } catch (quoteError) {
+        if (freeInstant) {
+          logger.warn('Quick delivery ETA quote failed while Instant is free; using default ETA', {
+            error: quoteError,
+          });
+          return {
+            available: true,
+            rate: 0,
+            etaMinutes: '60 min',
+            currency: 'INR',
+            courierName: 'Shiprocket Quick',
+          };
+        }
+        throw quoteError;
       }
-
-      return {
-        available: true,
-        rate: quote.rate,
-        etaMinutes: quote.etaMinutes,
-        currency: quote.currency,
-        courierName: quote.courierName,
-      };
     } catch (error) {
       // Never show Shiprocket API / account errors to storefront customers
       logger.warn('Quick delivery quote failed', {
@@ -2022,320 +2040,6 @@ export class OrderService {
     return uniqueIds.map((id) => byId.get(id)).filter(Boolean);
   }
 
-  /**
-   * Escalation lookup — order number, UUID, phone, or email (no status filter).
-   */
-  async searchEscalation(q: string) {
-    const query = q.trim();
-    if (!query) return [];
-
-    const digits = query.replace(/\D/g, '');
-    const phoneTail = digits.length >= 10 ? digits.slice(-10) : digits;
-
-    const or: Prisma.OrderWhereInput[] = [
-      { orderNumber: { contains: query, mode: 'insensitive' } },
-      { customerEmail: { contains: query, mode: 'insensitive' } },
-      { customerName: { contains: query, mode: 'insensitive' } },
-      { customerPhone: { contains: query } },
-    ];
-
-    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(query)) {
-      or.push({ id: query });
-    }
-    if (phoneTail.length >= 7) {
-      or.push({ customerPhone: { contains: phoneTail } });
-    }
-    if (query.length >= 4 && query.length <= 12) {
-      or.push({ orderNumber: { endsWith: query, mode: 'insensitive' } });
-    }
-
-    return prisma.order.findMany({
-      where: { deletedAt: null, OR: or },
-      select: {
-        id: true,
-        orderNumber: true,
-        status: true,
-        customerName: true,
-        customerPhone: true,
-        customerEmail: true,
-        grandTotal: true,
-        refundedAt: true,
-        refundCouponCode: true,
-        createdAt: true,
-        updatedAt: true,
-        payments: {
-          orderBy: { createdAt: 'desc' as const },
-          take: 1,
-          select: { status: true, method: true, amount: true },
-        },
-        trackingHistory: {
-          orderBy: { timestamp: 'desc' as const },
-          take: 20,
-          select: { status: true, timestamp: true },
-        },
-      },
-      orderBy: { updatedAt: 'desc' },
-      take: 30,
-    });
-  }
-
-  /**
-   * Full escalation update — bypasses normal status transition and refund locks.
-   */
-  async applyEscalation(
-    id: string,
-    data: {
-      status?: OrderStatus;
-      customerName?: string;
-      customerPhone?: string;
-      customerEmail?: string;
-      shippingAddress?: Partial<ShippingAddress> & Record<string, unknown>;
-      notes?: string;
-      clearRefundMarkers?: boolean;
-      reason?: string;
-    },
-  ) {
-    const order = await prisma.order.findFirst({
-      where: { id, deletedAt: null },
-      select: {
-        id: true,
-        orderNumber: true,
-        status: true,
-        grandTotal: true,
-        customerName: true,
-        customerPhone: true,
-        customerEmail: true,
-        shippingAddress: true,
-        notes: true,
-        couponId: true,
-        discountAmount: true,
-        refundedAt: true,
-        refundAmount: true,
-        refundCouponId: true,
-        refundCouponCode: true,
-        items: {
-          select: { productId: true, productColorId: true, quantity: true },
-        },
-        payments: {
-          select: { id: true, status: true, amount: true },
-        },
-      },
-    });
-    if (!order) throw new ApiError(404, 'Order not found');
-
-    const previousStatus = order.status;
-    const nextStatus = data.status ?? previousStatus;
-    const statusChanged = data.status !== undefined && data.status !== previousStatus;
-    const reason = data.reason?.trim() || 'Admin escalation override';
-
-    const existingAddress = (order.shippingAddress ?? {}) as unknown as ShippingAddress;
-    let nextAddress: ShippingAddress | undefined;
-    if (data.shippingAddress) {
-      nextAddress = {
-        ...existingAddress,
-        ...Object.fromEntries(
-          Object.entries(data.shippingAddress).filter(([, v]) => v !== undefined),
-        ),
-      } as ShippingAddress;
-    }
-
-    const stockDeductedStatuses: OrderStatus[] = [
-      'CONFIRMED',
-      'READY_TO_SHIP',
-      'SHIPPED',
-      'IN_TRANSIT',
-      'DELIVERED',
-      'RETURNED',
-      'RTO',
-      'REFUNDED',
-    ];
-    const reservedStatuses: OrderStatus[] = ['PLACED', 'PAYMENT_PENDING'];
-    const wasStockDeducted = stockDeductedStatuses.includes(previousStatus);
-    const willBeStockDeducted = stockDeductedStatuses.includes(nextStatus);
-    const wasReserved = reservedStatuses.includes(previousStatus);
-    const willBeReserved = reservedStatuses.includes(nextStatus);
-    const willCancel = nextStatus === 'CANCELLED' || nextStatus === 'FAILED';
-    /** Any status after a successful payment phase — must not stay unpaid or sync will revert. */
-    const needsSuccessfulPayment =
-      statusChanged && !['PAYMENT_PENDING', 'FAILED'].includes(nextStatus);
-    const needsPendingPayment = statusChanged && nextStatus === 'PAYMENT_PENDING';
-    const needsFailedPayment = statusChanged && nextStatus === 'FAILED';
-    const recoverReservedFromFailed =
-      previousStatus === 'FAILED' && (nextStatus === 'PLACED' || nextStatus === 'PAYMENT_PENDING');
-
-    await runPrismaTransaction(async (tx) => {
-      const patch: Prisma.OrderUpdateInput = {
-        ...(data.customerName !== undefined && { customerName: data.customerName }),
-        ...(data.customerPhone !== undefined && { customerPhone: data.customerPhone }),
-        ...(data.customerEmail !== undefined && { customerEmail: data.customerEmail }),
-        ...(data.notes !== undefined && { notes: data.notes }),
-        ...(nextAddress && {
-          shippingAddress: nextAddress as unknown as Prisma.InputJsonValue,
-        }),
-        ...(statusChanged && { status: nextStatus }),
-      };
-
-      if (data.clearRefundMarkers) {
-        patch.refundedAt = null;
-        patch.refundAmount = null;
-        patch.refundDeduction = null;
-        patch.refundCouponCode = null;
-        patch.refundCoupon = { disconnect: true };
-      }
-
-      if (Object.keys(patch).length > 0) {
-        await tx.order.update({ where: { id }, data: patch });
-      }
-
-      if (statusChanged) {
-        await tx.trackingHistory.create({
-          data: {
-            orderId: id,
-            status: nextStatus,
-            description: `Escalation: ${previousStatus} → ${nextStatus}. ${reason}`,
-          },
-        });
-
-        // Keep payment in sync with order status so Razorpay sync cannot overwrite escalation.
-        const hasSuccessfulPayment = order.payments.some((p) => p.status === 'SUCCESS');
-        if (needsSuccessfulPayment && !hasSuccessfulPayment) {
-          if (order.payments.length === 0) {
-            await tx.payment.create({
-              data: {
-                orderId: id,
-                amount: order.grandTotal,
-                currency: 'INR',
-                status: 'SUCCESS',
-                method: 'ADMIN',
-                transactionId: 'ESCALATION',
-                failureReason: null,
-              },
-            });
-          } else {
-            await tx.payment.updateMany({
-              where: { orderId: id, status: { not: 'SUCCESS' } },
-              data: {
-                status: 'SUCCESS',
-                method: 'ADMIN',
-                transactionId: 'ESCALATION',
-                failureReason: null,
-              },
-            });
-          }
-          await tx.trackingHistory.create({
-            data: {
-              orderId: id,
-              status: nextStatus,
-              description:
-                'Escalation: payment marked successful so the order stays placed (admin override)',
-            },
-          });
-        }
-
-        if (needsPendingPayment) {
-          await tx.payment.updateMany({
-            where: { orderId: id, status: { not: 'SUCCESS' } },
-            data: { status: 'PENDING', failureReason: null },
-          });
-        }
-
-        if (needsFailedPayment) {
-          await tx.payment.updateMany({
-            where: { orderId: id, status: { not: 'SUCCESS' } },
-            data: {
-              status: 'FAILED',
-              failureReason: reason,
-            },
-          });
-        }
-
-        // Payment-failed orders already released reserved stock — re-hold when recovering.
-        if (recoverReservedFromFailed) {
-          await this.reserveInventoryForItems(
-            tx,
-            order.items.map((item) => ({
-              productId: item.productId,
-              productColorId: item.productColorId,
-              quantity: item.quantity,
-            })),
-          );
-        }
-
-        // Inventory: confirm when entering deducted pipeline from reserved
-        if (
-          !wasStockDeducted &&
-          willBeStockDeducted &&
-          (wasReserved ||
-            recoverReservedFromFailed ||
-            previousStatus === 'CANCELLED' ||
-            previousStatus === 'FAILED')
-        ) {
-          await this.confirmOrderInventory(tx, id, order.items);
-        }
-
-        // Inventory: release reserved when cancelling from placed/pending
-        if (willCancel && (wasReserved || recoverReservedFromFailed)) {
-          // If we just re-reserved then cancel in same request, still release.
-          await this.releaseReservedInventory(tx, order.items);
-          if (order.couponId) {
-            await this.restoreCouponFromOrder(tx, order.couponId, Number(order.discountAmount));
-          }
-        }
-
-        // Inventory: restore sold stock when leaving deducted pipeline to cancel/fail/placed
-        if (wasStockDeducted && (willCancel || willBeReserved) && !willBeStockDeducted) {
-          await this.restoreConfirmedInventory(tx, id, order.items);
-          if (willCancel && order.couponId) {
-            await this.restoreCouponFromOrder(tx, order.couponId, Number(order.discountAmount));
-          }
-        }
-
-        if (nextStatus === 'RETURNED') {
-          await syncReturnRequestFromOrderStatus(tx, id, nextStatus);
-        }
-      } else if (data.reason?.trim()) {
-        await tx.trackingHistory.create({
-          data: {
-            orderId: id,
-            status: previousStatus,
-            description: `Escalation update: ${reason}`,
-          },
-        });
-      }
-    });
-
-    if (statusChanged) {
-      void this.sendStatusNotification(id, nextStatus).catch((err) =>
-        logger.warn('Escalation status notification failed', {
-          orderId: id,
-          status: nextStatus,
-          err,
-        }),
-      );
-    }
-
-    invalidateCache('dashboard:');
-    if (
-      statusChanged &&
-      (nextStatus === 'CONFIRMED' || nextStatus === 'CANCELLED' || previousStatus === 'CONFIRMED')
-    ) {
-      invalidateCache('product:');
-      invalidateCache('products:');
-      invalidateCache('storefront:');
-      realtime.catalogChanged('order-escalation');
-    }
-
-    realtime.orderStatusChanged({
-      orderId: order.id,
-      orderNumber: order.orderNumber,
-      status: nextStatus,
-      customerPhone: data.customerPhone ?? order.customerPhone,
-      grandTotal: Number(order.grandTotal),
-    });
-
-    return this.findByIdWithoutPaymentSync(id);
-  }
-
   async findById(id: string) {
     const order = await this.findByIdWithoutPaymentSync(id);
 
@@ -3380,68 +3084,6 @@ export class OrderService {
         tx.product.update({
           where: { id: productId },
           data: { soldCount: { increment: quantity } },
-        }),
-      ),
-    ]);
-  }
-
-  /** Reverse confirm inventory (escalation cancel / reopen). */
-  private async restoreConfirmedInventory(
-    tx: Prisma.TransactionClient,
-    orderId: string,
-    items: Array<{ productId: string; productColorId: string; quantity: number }>,
-  ) {
-    if (items.length === 0) return;
-
-    const qtyByColor = new Map<string, number>();
-    const soldByProduct = new Map<string, number>();
-    for (const item of items) {
-      qtyByColor.set(
-        item.productColorId,
-        (qtyByColor.get(item.productColorId) ?? 0) + item.quantity,
-      );
-      soldByProduct.set(item.productId, (soldByProduct.get(item.productId) ?? 0) + item.quantity);
-    }
-
-    const inventories = await tx.inventory.findMany({
-      where: { productColorId: { in: [...qtyByColor.keys()] }, deletedAt: null },
-    });
-    const inventoryByColor = new Map(inventories.map((row) => [row.productColorId, row]));
-
-    const historyRows: Prisma.InventoryHistoryCreateManyInput[] = [];
-    const inventoryUpdates: Promise<unknown>[] = [];
-
-    for (const [productColorId, quantity] of qtyByColor) {
-      const inventory = inventoryByColor.get(productColorId);
-      if (!inventory) continue;
-      const previousQty = inventory.quantity;
-      const newQty = previousQty + quantity;
-      historyRows.push({
-        inventoryId: inventory.id,
-        changeType: 'IN',
-        quantity,
-        previousQty,
-        newQty,
-        reason: 'Escalation inventory restore',
-        referenceId: orderId,
-      });
-      inventoryUpdates.push(
-        tx.inventory.update({
-          where: { id: inventory.id },
-          data: { quantity: newQty },
-        }),
-      );
-    }
-
-    await Promise.all([
-      ...inventoryUpdates,
-      historyRows.length > 0
-        ? tx.inventoryHistory.createMany({ data: historyRows })
-        : Promise.resolve(),
-      ...[...soldByProduct.entries()].map(([productId, quantity]) =>
-        tx.product.update({
-          where: { id: productId },
-          data: { soldCount: { decrement: quantity } },
         }),
       ),
     ]);

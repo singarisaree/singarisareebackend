@@ -14,8 +14,6 @@ import {
   cartSyncSchema,
   shippingQuoteSchema,
   quickQuoteSchema,
-  escalationSearchSchema,
-  escalationUpdateSchema,
 } from './order.schema';
 import { validateBody, validateQuery, validateParams, asyncHandler } from '@/middleware/validate';
 import { authenticateAdmin, loadAdmin, authenticateCustomer, AuthenticatedRequest, CustomerAuthenticatedRequest } from '@/middleware/auth';
@@ -203,30 +201,6 @@ router.post(
   asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
     const orders = await orderService.findByIdsForPrint(req.body.orderIds);
     sendSuccess(res, orders, 'Orders fetched');
-  }),
-);
-
-router.get(
-  '/escalation/search',
-  authenticateAdmin,
-  loadAdmin,
-  validateQuery(escalationSearchSchema),
-  asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
-    const q = typeof req.query.q === 'string' ? req.query.q : '';
-    const orders = await orderService.searchEscalation(q);
-    sendSuccess(res, orders, 'Escalation search results');
-  }),
-);
-
-router.patch(
-  '/:id/escalation',
-  authenticateAdmin,
-  loadAdmin,
-  validateParams(idParamSchema),
-  validateBody(escalationUpdateSchema),
-  asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
-    const order = await orderService.applyEscalation(paramString(req.params.id), req.body);
-    sendSuccess(res, order, 'Escalation applied');
   }),
 );
 

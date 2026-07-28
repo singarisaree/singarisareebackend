@@ -1089,11 +1089,6 @@ export class ShiprocketService {
       Number(row.total_amount) ||
       Number(row.amount) ||
       0;
-    const distance = Number(row.distance);
-    const etaFromDistance =
-      Number.isFinite(distance) && distance > 0
-        ? `~${Math.round(distance * 10) / 10} km`
-        : null;
     const etdHours = Number(row.etd_hours);
     const etaFromHours =
       Number.isFinite(etdHours) && etdHours > 0
@@ -1101,14 +1096,31 @@ export class ShiprocketService {
           ? 'About 1 hour'
           : `About ${etdHours} hours`
         : null;
-    const etaRaw =
-      etaFromHours ??
-      etaFromDistance ??
+    const durationMins = Number(
+      row.duration_minutes ?? row.eta_minutes ?? row.estimated_minutes ?? row.minutes,
+    );
+    const etaFromMinutes =
+      Number.isFinite(durationMins) && durationMins > 0 ? `${Math.round(durationMins)} min` : null;
+    // Prefer real time fields — never treat distance (km) as an ETA label.
+    const timeRaw =
       row.eta ??
       row.etd ??
       row.estimated_delivery_time ??
       row.estimated_time ??
-      row.delivery_time;
+      row.delivery_time ??
+      row.duration ??
+      null;
+    const timeLabel =
+      timeRaw != null && String(timeRaw).trim() && !/\bkm\b/i.test(String(timeRaw))
+        ? String(timeRaw).trim()
+        : null;
+    // Last resort: estimate minutes from distance (hyperlocal city pace + buffer).
+    const distance = Number(row.distance);
+    const etaFromDistance =
+      Number.isFinite(distance) && distance > 0
+        ? `${Math.max(30, Math.round(20 + distance * 4))} min`
+        : null;
+    const etaRaw = etaFromHours ?? etaFromMinutes ?? timeLabel ?? etaFromDistance;
     const courierNameRaw = row.courier_name ?? row.partner_name ?? row.service_name;
     const courierIdRaw = Number(row.courier_company_id ?? row.courier_id ?? row.id);
     return {
