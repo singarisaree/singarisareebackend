@@ -170,6 +170,48 @@ function extractShiprocketMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function haversineKm(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number,
+): number {
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+/** Hyper-local Instant ETA from road distance (prep buffer + city pace). */
+function etaMinutesFromDistanceKm(km: number): number {
+  if (!Number.isFinite(km) || km <= 0) return 60;
+  return Math.min(180, Math.max(30, Math.round(20 + km * 4)));
+}
+
+function readDistanceKm(row: Record<string, unknown>): number | null {
+  const candidates = [
+    row.distance,
+    row.distance_in_km,
+    row.distance_km,
+    row.approx_distance,
+    row.route_distance,
+  ];
+  for (const value of candidates) {
+    if (value == null) continue;
+    if (typeof value === 'string') {
+      const parsed = Number(value.replace(/[^\d.]/g, ''));
+      if (Number.isFinite(parsed) && parsed > 0) return parsed;
+      continue;
+    }
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
 function extractDocumentUrl(payload: Record<string, unknown>, keys: string[]): string {
   const nested = payload.data as Record<string, unknown> | unknown[] | undefined;
   const candidates: unknown[] = [payload, nested];
@@ -1080,6 +1122,7 @@ export class ShiprocketService {
   private mapHyperlocalQuoteRow(
     row: Record<string, unknown>,
     raw: Record<string, unknown>,
+    fallbackDistanceKm?: number | null,
   ): ShiprocketQuickQuote {
     const rate =
       Number(row.rates) ||
@@ -1089,44 +1132,34 @@ export class ShiprocketService {
       Number(row.total_amount) ||
       Number(row.amount) ||
       0;
-    const etdHours = Number(row.etd_hours);
-    const etaFromHours =
-      Number.isFinite(etdHours) && etdHours > 0
-        ? etdHours === 1
-          ? 'About 1 hour'
-          : `About ${etdHours} hours`
-        : null;
+
+    // Instant ETA is distance-based so checkout can show a clock time (e.g. 1:00 pm).
+    const distanceKm = readDistanceKm(row) ?? (
+      fallbackDistanceKm != null && Number.isFinite(fallbackDistanceKm) && fallbackDistanceKm > 0
+        ? fallbackDistanceKm
+        : null
+    );
+    const etaFromDistance =
+      distanceKm != null ? `${etaMinutesFromDistanceKm(distanceKm)} min` : null;
+
     const durationMins = Number(
       row.duration_minutes ?? row.eta_minutes ?? row.estimated_minutes ?? row.minutes,
     );
     const etaFromMinutes =
       Number.isFinite(durationMins) && durationMins > 0 ? `${Math.round(durationMins)} min` : null;
-    // Prefer real time fields — never treat distance (km) as an ETA label.
-    const timeRaw =
-      row.eta ??
-      row.etd ??
-      row.estimated_delivery_time ??
-      row.estimated_time ??
-      row.delivery_time ??
-      row.duration ??
-      null;
-    const timeLabel =
-      timeRaw != null && String(timeRaw).trim() && !/\bkm\b/i.test(String(timeRaw))
-        ? String(timeRaw).trim()
+    const etdHours = Number(row.etd_hours);
+    const etaFromHours =
+      Number.isFinite(etdHours) && etdHours > 0
+        ? `${Math.round(etdHours * 60)} min`
         : null;
-    // Last resort: estimate minutes from distance (hyperlocal city pace + buffer).
-    const distance = Number(row.distance);
-    const etaFromDistance =
-      Number.isFinite(distance) && distance > 0
-        ? `${Math.max(30, Math.round(20 + distance * 4))} min`
-        : null;
-    const etaRaw = etaFromHours ?? etaFromMinutes ?? timeLabel ?? etaFromDistance;
+
+    const etaRaw = etaFromDistance ?? etaFromMinutes ?? etaFromHours ?? '60 min';
     const courierNameRaw = row.courier_name ?? row.partner_name ?? row.service_name;
     const courierIdRaw = Number(row.courier_company_id ?? row.courier_id ?? row.id);
     return {
       rate: Number.isFinite(rate) ? Math.round(rate * 100) / 100 : 0,
       currency: String(row.currency ?? 'INR').trim() || 'INR',
-      etaMinutes: etaRaw != null && String(etaRaw).trim() ? String(etaRaw) : null,
+      etaMinutes: etaRaw,
       courierName:
         typeof courierNameRaw === 'string' && courierNameRaw.trim() ? courierNameRaw.trim() : null,
       // HL serviceability often omits courier id — AWB assign must not send one
@@ -1173,8 +1206,15 @@ export class ShiprocketService {
         throw new ApiError(400, 'Instant delivery is not available for this location');
       }
 
+      const fallbackDistanceKm = haversineKm(
+        payload.pickupLatitude,
+        payload.pickupLongitude,
+        payload.deliveryLatitude,
+        payload.deliveryLongitude,
+      );
+
       const quotes = rows
-        .map((row) => this.mapHyperlocalQuoteRow(row, body))
+        .map((row) => this.mapHyperlocalQuoteRow(row, body, fallbackDistanceKm))
         .filter((q) => Number.isFinite(q.rate) && q.rate >= 0)
         .sort((a, b) => a.rate - b.rate);
 
