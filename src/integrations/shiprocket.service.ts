@@ -298,6 +298,23 @@ export class ShiprocketService {
     }
   }
 
+  /** Reverse pickup: customer → warehouse (POST /orders/create/return). */
+  async createReturnOrder(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    try {
+      const headers = await this.getAuthHeaders();
+      const response = await this.client.post('/orders/create/return', payload, { headers });
+      return response.data as Record<string, unknown>;
+    } catch (error) {
+      logger.error('Shiprocket create return order failed', {
+        error: axios.isAxiosError(error) ? error.response?.data : error,
+      });
+      throw new ApiError(
+        502,
+        extractShiprocketMessage(error, 'Shiprocket reverse pickup could not be created'),
+      );
+    }
+  }
+
   /** Shiprocket may return shipment_id at the top level or nested under data. */
   extractShipmentId(payload: Record<string, unknown>): number | null {
     const candidates = [

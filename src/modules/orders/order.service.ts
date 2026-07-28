@@ -125,6 +125,8 @@ const orderDetailInclude = {
       refundCouponId: true,
       refundCouponCode: true,
       adminNotes: true,
+      reverseAwbCode: true,
+      reverseTrackingUrl: true,
       items: {
         select: {
           id: true,
@@ -1871,10 +1873,17 @@ export class OrderService {
         next = { ...next, status: 'PLACED' };
       }
 
-      // Customers only need Drop OTP — never expose pickup / RTO OTPs
+      // Customers only need Drop OTP before delivery — never expose pickup / RTO OTPs
       if (next.shipping) {
         const { pickupOtp: _pickup, rtoOtp: _rto, ...safeShipping } = next.shipping;
-        next = { ...next, shipping: { ...safeShipping, dropOtp: next.shipping.dropOtp ?? null } };
+        const hideDropOtp = ['DELIVERED', 'RETURNED', 'REFUNDED'].includes(next.status);
+        next = {
+          ...next,
+          shipping: {
+            ...safeShipping,
+            dropOtp: hideDropOtp ? null : (next.shipping.dropOtp ?? null),
+          },
+        };
       }
 
       return next;
@@ -2101,6 +2110,13 @@ export class OrderService {
         },
         payments: { select: { status: true } },
         trackingHistory: { select: { status: true }, take: 20 },
+        shipping: {
+          select: {
+            method: true,
+            shiprocketShipmentId: true,
+            awbCode: true,
+          },
+        },
       },
     });
     if (!order) throw new ApiError(404, 'Order not found');
@@ -2119,25 +2135,39 @@ export class OrderService {
 
     this.assertValidStatusTransition(order.status, status);
 
+    // After Shiprocket AWB, carrier is source of truth for forward fulfillment.
+    const shiprocketOwned = ['SHIPPED', 'IN_TRANSIT', 'DELIVERED'] as const;
+    if (
+      OrderService.hasShiprocketShipment(order.shipping) &&
+      shiprocketOwned.includes(status as (typeof shiprocketOwned)[number])
+    ) {
+      throw new ApiError(
+        400,
+        'Shipment is with Shiprocket — Shipped / In transit / Delivered update automatically from tracking. Use Cancel or RTO only if needed.',
+      );
+    }
+
+    const statusChanged = order.status !== status;
     const confirming =
       status === 'CONFIRMED' && ['PLACED', 'PAYMENT_PENDING'].includes(order.status);
     const cancelling =
       status === 'CANCELLED' && ['PLACED', 'PAYMENT_PENDING'].includes(order.status);
 
     await runPrismaTransaction(async (tx) => {
-      await Promise.all([
-        tx.order.update({
-          where: { id },
-          data: { status, ...(notes !== undefined && { notes }) },
-        }),
-        tx.trackingHistory.create({
+      await tx.order.update({
+        where: { id },
+        data: { status, ...(notes !== undefined && { notes }) },
+      });
+
+      if (statusChanged) {
+        await tx.trackingHistory.create({
           data: {
             orderId: id,
             status,
             description: getOrderStatusTrackingDescription(status),
           },
-        }),
-      ]);
+        });
+      }
 
       if (status === 'RETURNED') {
         await syncReturnRequestFromOrderStatus(tx, id, status);
@@ -2155,18 +2185,22 @@ export class OrderService {
       }
     });
 
-    void this.sendStatusNotification(id, status).catch((err) =>
-      logger.warn('Status notification failed', { orderId: id, status, err }),
-    );
+    if (statusChanged) {
+      void this.sendStatusNotification(id, status).catch((err) =>
+        logger.warn('Status notification failed', { orderId: id, status, err }),
+      );
+    }
 
     invalidateCache('dashboard:');
-    realtime.orderStatusChanged({
-      orderId: order.id,
-      orderNumber: order.orderNumber,
-      status,
-      customerPhone: order.customerPhone,
-      grandTotal: Number(order.grandTotal),
-    });
+    if (statusChanged) {
+      realtime.orderStatusChanged({
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        status,
+        customerPhone: order.customerPhone,
+        grandTotal: Number(order.grandTotal),
+      });
+    }
     if (status === 'CONFIRMED' || status === 'CANCELLED') {
       invalidateCache('product:');
       invalidateCache('products:');

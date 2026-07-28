@@ -517,6 +517,10 @@ model ReturnRequest {
   pickedUpAt         DateTime?           @map("picked_up_at")
   pickupCancelledAt  DateTime?           @map("pickup_cancelled_at")
   returnedAt         DateTime?           @map("returned_at")
+  shiprocketReturnOrderId    String?     @map("shiprocket_return_order_id")
+  shiprocketReturnShipmentId String?     @map("shiprocket_return_shipment_id")
+  reverseAwbCode               String?     @map("reverse_awb_code")
+  reverseTrackingUrl           String?     @map("reverse_tracking_url")
   refundCouponId     String?             @map("refund_coupon_id") @db.Uuid
   refundCouponCode   String?             @map("refund_coupon_code")
   createdAt          DateTime            @default(now()) @map("created_at")

@@ -74,6 +74,15 @@ export class DashboardService {
     };
   }
 
+  private revenueExcludingShipping(sum: {
+    grandTotal: Prisma.Decimal | number | null;
+    shippingCharge: Prisma.Decimal | number | null;
+  }): number {
+    const grand = Number(sum.grandTotal || 0);
+    const shipping = Number(sum.shippingCharge || 0);
+    return grand - shipping;
+  }
+
   private async fetchStats() {
     const today = startOfDay();
     const weekStart = startOfWeek();
@@ -95,19 +104,19 @@ export class DashboardService {
     ] = await Promise.all([
       prisma.order.aggregate({
         where: this.revenueWhere(),
-        _sum: { grandTotal: true },
+        _sum: { grandTotal: true, shippingCharge: true },
       }),
       prisma.order.aggregate({
         where: this.revenueWhere(today),
-        _sum: { grandTotal: true },
+        _sum: { grandTotal: true, shippingCharge: true },
       }),
       prisma.order.aggregate({
         where: this.revenueWhere(weekStart),
-        _sum: { grandTotal: true },
+        _sum: { grandTotal: true, shippingCharge: true },
       }),
       prisma.order.aggregate({
         where: this.revenueWhere(monthStart),
-        _sum: { grandTotal: true },
+        _sum: { grandTotal: true, shippingCharge: true },
       }),
       prisma.order.count({ where: { createdAt: { gte: today }, deletedAt: null } }),
       prisma.order.groupBy({
@@ -204,10 +213,22 @@ export class DashboardService {
     }));
 
     return {
-      totalRevenue: Number(totalRevenue._sum.grandTotal || 0),
-      todayRevenue: Number(todayRevenue._sum.grandTotal || 0),
-      weekRevenue: Number(weekRevenue._sum.grandTotal || 0),
-      monthRevenue: Number(monthRevenue._sum.grandTotal || 0),
+      totalRevenue: this.revenueExcludingShipping({
+        grandTotal: totalRevenue._sum.grandTotal,
+        shippingCharge: totalRevenue._sum.shippingCharge,
+      }),
+      todayRevenue: this.revenueExcludingShipping({
+        grandTotal: todayRevenue._sum.grandTotal,
+        shippingCharge: todayRevenue._sum.shippingCharge,
+      }),
+      weekRevenue: this.revenueExcludingShipping({
+        grandTotal: weekRevenue._sum.grandTotal,
+        shippingCharge: weekRevenue._sum.shippingCharge,
+      }),
+      monthRevenue: this.revenueExcludingShipping({
+        grandTotal: monthRevenue._sum.grandTotal,
+        shippingCharge: monthRevenue._sum.shippingCharge,
+      }),
       todayOrders,
       pendingOrders,
       paymentPending: countByStatus.PAYMENT_PENDING ?? 0,
@@ -241,7 +262,7 @@ export class DashboardService {
     const rows = await prisma.$queryRaw<Array<{ month: string; revenue: number }>>`
       SELECT
         to_char(created_at, 'YYYY-MM') AS month,
-        COALESCE(SUM(grand_total), 0)::float AS revenue
+        COALESCE(SUM(grand_total - shipping_charge), 0)::float AS revenue
       FROM orders
       WHERE created_at >= ${start}
         AND deleted_at IS NULL
@@ -973,15 +994,8 @@ export class ShippingService {
         },
       });
       orderEmailService.queueStatusEmail(orderId, 'READY_TO_SHIP');
-    } else if (canResumePickup) {
-      await prisma.trackingHistory.create({
-        data: {
-          orderId,
-          status: 'READY_TO_SHIP',
-          description: `Pickup scheduled for ${pickupDate} via ${courierName || 'courier'}`,
-        },
-      });
     }
+    // Already READY_TO_SHIP: pickup resume must not append another Ready-to-ship timeline row.
 
     if (!options.asInstantHyperlocal) {
       await this.syncOrderLiveDeliveryEstimateAfterShipment(orderId, order.shippingAddress, {
@@ -1991,19 +2005,31 @@ export class ShippingService {
     const now = new Date();
     const sourceLabel = options?.source === 'webhook' ? 'Shiprocket webhook' : 'Shiprocket sync';
 
-    await prisma.$transaction(async (tx) => {
-      await tx.order.update({
-        where: { id: orderId },
+    const applied = await prisma.$transaction(async (tx) => {
+      // Conditional update prevents webhook+poll races from writing the same status twice.
+      const updated = await tx.order.updateMany({
+        where: {
+          id: orderId,
+          status: order.status,
+        },
         data: { status: nextStatus },
       });
+      if (updated.count === 0) return false;
 
-      await tx.trackingHistory.create({
-        data: {
-          orderId,
-          status: nextStatus,
-          description: `${getOrderStatusTrackingDescription(nextStatus)} (${sourceLabel})`,
-        },
+      const latestTracking = await tx.trackingHistory.findFirst({
+        where: { orderId },
+        orderBy: { timestamp: 'desc' },
+        select: { status: true },
       });
+      if (latestTracking?.status !== nextStatus) {
+        await tx.trackingHistory.create({
+          data: {
+            orderId,
+            status: nextStatus,
+            description: `${getOrderStatusTrackingDescription(nextStatus)} (${sourceLabel})`,
+          },
+        });
+      }
 
       if (order.shipping) {
         await tx.shipping.update({
@@ -2017,7 +2043,11 @@ export class ShippingService {
           },
         });
       }
+
+      return true;
     });
+
+    if (!applied) return false;
 
     realtime.orderStatusChanged({
       orderId: order.id,

@@ -72,6 +72,7 @@ export function createApp(): Application {
   );
 
   app.use(compression());
+  app.use(cookieParser());
 
   // Serve locally stored images. Long-lived cache since filenames are content-unique (UUIDs).
   app.use(
@@ -130,7 +131,6 @@ export function createApp(): Application {
     }),
   );
   app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-  app.use(cookieParser());
 
   app.use((req, _res, next) => {
     if (!isDevelopment && req.method === 'GET') {

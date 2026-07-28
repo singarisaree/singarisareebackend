@@ -18,6 +18,7 @@ import { realtime } from '@/realtime/emitter';
 import { whatsAppService } from '@/integrations/whatsapp.service';
 import { logger } from '@/utils/logger';
 import { isInternationalShippingAddressFromJson } from '@/utils/shipping-address';
+import { bookShiprocketReversePickup } from '@/modules/return-requests/return-request-reverse-pickup';
 
 const ACTIVE_STATUSES: ReturnRequestStatus[] = [
   ReturnRequestStatus.REQUESTED,
@@ -129,6 +130,60 @@ function formatReturnRequest(
 }
 
 export class ReturnRequestService {
+  /**
+   * Accept return + book Shiprocket reverse pickup, then move to OUT_FOR_PICKUP.
+   */
+  private async acceptAndBookReversePickup(
+    id: string,
+    existing: { orderId: string; adminNotes: string | null },
+    adminNotes?: string,
+  ) {
+    const booking = await bookShiprocketReversePickup(id);
+    const now = new Date();
+    const pickupNote = booking.reverseAwbCode
+      ? `Reverse pickup booked via Shiprocket · AWB ${booking.reverseAwbCode}`
+      : booking.shiprocketReturnShipmentId
+        ? `Reverse pickup booked via Shiprocket · shipment #${booking.shiprocketReturnShipmentId}`
+        : 'Reverse pickup booked via Shiprocket';
+
+    const updated = await prisma.$transaction(async (tx) => {
+      await tx.returnRequest.update({
+        where: { id },
+        data: {
+          status: ReturnRequestStatus.OUT_FOR_PICKUP,
+          adminNotes: adminNotes?.trim() || existing.adminNotes,
+          acceptedAt: now,
+        },
+      });
+
+      await tx.returnRequestTrackingHistory.create({
+        data: {
+          returnRequestId: id,
+          status: ReturnRequestStatus.ACCEPTED,
+          description: getReturnStatusDescription(ReturnRequestStatus.ACCEPTED),
+        },
+      });
+
+      await tx.returnRequestTrackingHistory.create({
+        data: {
+          returnRequestId: id,
+          status: ReturnRequestStatus.OUT_FOR_PICKUP,
+          description: pickupNote,
+        },
+      });
+
+      await syncOrderFromReturnStatus(tx, existing.orderId, ReturnRequestStatus.ACCEPTED);
+      await syncOrderFromReturnStatus(tx, existing.orderId, ReturnRequestStatus.OUT_FOR_PICKUP);
+
+      return tx.returnRequest.findUniqueOrThrow({
+        where: { id },
+        include: returnInclude,
+      });
+    });
+
+    return formatReturnRequest(updated);
+  }
+
   private queueStatusNotification(request: {
     orderId: string;
     customerPhone: string;
@@ -372,6 +427,23 @@ export class ReturnRequestService {
       throw new ApiError(400, `Cannot change return status from ${current} to ${nextStatus}`);
     }
 
+    if (
+      !force &&
+      current === ReturnRequestStatus.REQUESTED &&
+      nextStatus === ReturnRequestStatus.ACCEPTED
+    ) {
+      const formatted = await this.acceptAndBookReversePickup(id, existing, data.adminNotes);
+      realtime.returnRequestUpdated({
+        returnRequestId: formatted.id,
+        orderId: formatted.orderId,
+        orderNumber: formatted.order?.orderNumber,
+        status: formatted.status,
+        customerPhone: formatted.customerPhone,
+      });
+      this.queueStatusNotification(formatted);
+      return formatted;
+    }
+
     const now = new Date();
     const updated = await prisma.$transaction(async (tx) => {
       await tx.returnRequest.update({
@@ -527,7 +599,11 @@ export class ReturnRequestService {
       }
     }
 
-    const initialStatus = data.initialStatus ?? ReturnRequestStatus.ACCEPTED;
+    const wantsAutoReversePickup =
+      (data.initialStatus ?? ReturnRequestStatus.ACCEPTED) === ReturnRequestStatus.ACCEPTED;
+    const initialStatus = wantsAutoReversePickup
+      ? ReturnRequestStatus.REQUESTED
+      : (data.initialStatus ?? ReturnRequestStatus.ACCEPTED);
     const now = new Date();
 
     const created = await prisma.$transaction(async (tx) => {
@@ -577,6 +653,23 @@ export class ReturnRequestService {
     });
 
     const formatted = formatReturnRequest(created);
+    if (wantsAutoReversePickup) {
+      const booked = await this.acceptAndBookReversePickup(
+        formatted.id,
+        { orderId: order.id, adminNotes: formatted.adminNotes ?? null },
+        data.adminNotes,
+      );
+      realtime.returnRequestCreated({
+        returnRequestId: booked.id,
+        orderId: booked.orderId,
+        orderNumber: booked.order?.orderNumber,
+        status: booked.status,
+        customerPhone: booked.customerPhone,
+      });
+      this.queueStatusNotification(booked);
+      return booked;
+    }
+
     realtime.returnRequestCreated({
       returnRequestId: formatted.id,
       orderId: formatted.orderId,
