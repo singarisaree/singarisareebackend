@@ -52,7 +52,6 @@ export const adminCreateReturnRequestSchema = z.object({
     )
     .min(1),
   adminNotes: z.string().max(2000).optional(),
-  /** Default ACCEPTED for escalation arrange-return */
   initialStatus: z.nativeEnum(ReturnRequestStatus).optional(),
-  force: z.boolean().optional().default(true),
+  force: z.boolean().optional().default(false),
 });

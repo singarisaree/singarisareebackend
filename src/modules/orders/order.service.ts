@@ -1749,7 +1749,7 @@ export class OrderService {
       READY_TO_SHIP: ['SHIPPED', 'CANCELLED', 'RTO'],
       SHIPPED: ['IN_TRANSIT', 'DELIVERED', 'RTO'],
       IN_TRANSIT: ['DELIVERED', 'RTO'],
-      DELIVERED: ['RETURNED', 'REFUNDED'],
+      DELIVERED: ['REFUNDED'],
       RETURNED: ['REFUNDED'],
       RTO: ['CONFIRMED', 'CANCELLED', 'REFUNDED'],
       FAILED: ['PAYMENT_PENDING', 'CANCELLED'],
@@ -1921,10 +1921,21 @@ export class OrderService {
           ],
         });
       } else if (query.status === 'RETURNED') {
+        // Full returns (status RETURNED) + partial returns (still DELIVERED with a returned RR)
         andFilters.push({
-          status: 'RETURNED',
-          refundedAt: null,
-          payments: { none: { status: 'REFUNDED' } },
+          OR: [
+            {
+              status: 'RETURNED',
+              refundedAt: null,
+              payments: { none: { status: 'REFUNDED' } },
+            },
+            {
+              status: 'DELIVERED',
+              returnRequests: {
+                some: { status: 'RETURNED' },
+              },
+            },
+          ],
         });
       } else if (query.status === 'REFUNDED') {
         andFilters.push({
@@ -1987,6 +1998,11 @@ export class OrderService {
           shippingAddress: true,
           createdAt: true,
           updatedAt: true,
+          returnRequests: {
+            where: { status: 'RETURNED' },
+            select: { id: true, status: true },
+            take: 1,
+          },
         },
         orderBy: { [sortBy]: sortOrder },
         skip,

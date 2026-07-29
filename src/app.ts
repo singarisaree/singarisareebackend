@@ -106,6 +106,12 @@ export function createApp(): Application {
   const isWhatsAppWebhook = (req: express.Request) =>
     req.path === `${apiPrefix}/whatsapp/webhook` || req.path === `${apiPrefix}/whatsapp/webhook/`;
 
+  /** Login/refresh must work even when IP was rate-limited while unauthenticated. */
+  const isAuthBootstrap = (req: express.Request) =>
+    new RegExp(
+      `^${apiPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/auth/(login|refresh)(/|$)`,
+    ).test(req.path);
+
   app.use(
     rateLimit({
       windowMs: parseInt(env.RATE_LIMIT_WINDOW_MS, 10),
@@ -114,6 +120,7 @@ export function createApp(): Application {
       legacyHeaders: false,
       skip: (req) =>
         hasValidAdminSession(req) ||
+        isAuthBootstrap(req) ||
         isStorefrontRead(req) ||
         isCheckoutMutation(req) ||
         isWhatsAppWebhook(req),

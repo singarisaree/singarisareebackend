@@ -1,9 +1,9 @@
 import { ReturnRequestStatus, Prisma } from '@prisma/client';
 import { prisma } from '@/config/database';
+import { runPrismaTransaction } from '@/utils/prisma-transaction';
 import { ApiError } from '@/shared/api-response';
 import { parsePagination, parseCreatedAtFilter } from '@/utils/helpers';
 import { buildPaginationMeta } from '@/shared/api-response';
-import { localStorageService } from '@/integrations/local-storage.service';
 import { z } from 'zod';
 import {
   createReturnRequestSchema,
@@ -19,16 +19,6 @@ import { whatsAppService } from '@/integrations/whatsapp.service';
 import { logger } from '@/utils/logger';
 import { isInternationalShippingAddressFromJson } from '@/utils/shipping-address';
 import { bookShiprocketReversePickup } from '@/modules/return-requests/return-request-reverse-pickup';
-
-const ACTIVE_STATUSES: ReturnRequestStatus[] = [
-  ReturnRequestStatus.REQUESTED,
-  ReturnRequestStatus.ACCEPTED,
-  ReturnRequestStatus.OUT_FOR_PICKUP,
-  ReturnRequestStatus.PICKUP_CANCELLED,
-  ReturnRequestStatus.PICKED_UP,
-];
-
-const RETURN_WINDOW_DAYS = 3;
 
 const returnItemInclude = {
   orderItem: {
@@ -80,29 +70,6 @@ const returnListInclude = {
   },
 } satisfies Prisma.ReturnRequestInclude;
 
-function getDeliveredAt(order: {
-  shipping?: { deliveredAt: Date | null } | null;
-  trackingHistory: Array<{ timestamp: Date }>;
-}): Date | null {
-  if (order.shipping?.deliveredAt) return order.shipping.deliveredAt;
-  if (order.trackingHistory[0]) return order.trackingHistory[0].timestamp;
-  return null;
-}
-
-function assertWithinReturnWindow(deliveredAt: Date | null) {
-  if (!deliveredAt) {
-    throw new ApiError(400, 'Delivery date not found for this order');
-  }
-  const deadline = new Date(deliveredAt);
-  deadline.setDate(deadline.getDate() + RETURN_WINDOW_DAYS);
-  if (new Date() > deadline) {
-    throw new ApiError(
-      400,
-      'Return window has expired. Returns are allowed within 3 days of delivery.',
-    );
-  }
-}
-
 function formatReturnRequest(
   request:
     | Prisma.ReturnRequestGetPayload<{ include: typeof returnInclude }>
@@ -146,7 +113,7 @@ export class ReturnRequestService {
         ? `Reverse pickup booked via Shiprocket · shipment #${booking.shiprocketReturnShipmentId}`
         : 'Reverse pickup booked via Shiprocket';
 
-    const updated = await prisma.$transaction(async (tx) => {
+    await runPrismaTransaction(async (tx) => {
       await tx.returnRequest.update({
         where: { id },
         data: {
@@ -174,11 +141,12 @@ export class ReturnRequestService {
 
       await syncOrderFromReturnStatus(tx, existing.orderId, ReturnRequestStatus.ACCEPTED);
       await syncOrderFromReturnStatus(tx, existing.orderId, ReturnRequestStatus.OUT_FOR_PICKUP);
+    });
 
-      return tx.returnRequest.findUniqueOrThrow({
-        where: { id },
-        include: returnInclude,
-      });
+    // Heavy include read stays outside the transaction to keep it short.
+    const updated = await prisma.returnRequest.findUniqueOrThrow({
+      where: { id },
+      include: returnInclude,
     });
 
     return formatReturnRequest(updated);
@@ -223,141 +191,11 @@ export class ReturnRequestService {
     });
   }
 
-  async create(data: z.infer<typeof createReturnRequestSchema>, files?: Express.Multer.File[]) {
-    const order = await prisma.order.findFirst({
-      where: {
-        id: data.orderId,
-        customerPhone: data.phone,
-        deletedAt: null,
-      },
-      include: {
-        items: true,
-        shipping: { select: { deliveredAt: true } },
-        trackingHistory: {
-          where: { status: 'DELIVERED' },
-          orderBy: { timestamp: 'desc' },
-          take: 1,
-          select: { timestamp: true },
-        },
-      },
-    });
-
-    if (!order) throw new ApiError(404, 'Order not found for this mobile number');
-    if (isInternationalShippingAddressFromJson(order.shippingAddress)) {
-      throw new ApiError(400, 'Returns are not available for international orders');
-    }
-    if (order.status !== 'DELIVERED') {
-      throw new ApiError(400, 'Return can only be requested for delivered orders');
-    }
-
-    assertWithinReturnWindow(getDeliveredAt(order));
-
-    const activeReturn = await prisma.returnRequest.findFirst({
-      where: {
-        orderId: order.id,
-        status: { in: ACTIVE_STATUSES },
-      },
-    });
-
-    if (activeReturn) {
-      throw new ApiError(400, 'A return request is already in progress for this order');
-    }
-
-    const orderItemById = new Map(order.items.map((item) => [item.id, item]));
-    const uniqueItemIds = new Set(data.items.map((item) => item.orderItemId));
-    if (uniqueItemIds.size !== data.items.length) {
-      throw new ApiError(400, 'Duplicate items in return request');
-    }
-
-    for (const item of data.items) {
-      if (!orderItemById.has(item.orderItemId)) {
-        throw new ApiError(400, 'One or more items do not belong to this order');
-      }
-    }
-
-    const existingReturnQtys = await prisma.returnRequestItem.groupBy({
-      by: ['orderItemId'],
-      where: {
-        orderItemId: { in: [...uniqueItemIds] },
-        returnRequest: {
-          orderId: order.id,
-          status: { not: ReturnRequestStatus.REJECTED },
-        },
-      },
-      _sum: { quantity: true },
-    });
-
-    const alreadyReturning = new Map(
-      existingReturnQtys.map((row) => [row.orderItemId, row._sum.quantity ?? 0]),
+  async create(_data: z.infer<typeof createReturnRequestSchema>, _files?: Express.Multer.File[]) {
+    throw new ApiError(
+      403,
+      'Online returns are not available. For damages within 3 days of delivery, please contact +91 9490458789.',
     );
-
-    for (const item of data.items) {
-      const orderItem = orderItemById.get(item.orderItemId)!;
-      const used = alreadyReturning.get(item.orderItemId) ?? 0;
-      const available = orderItem.quantity - used;
-      if (item.quantity > available) {
-        throw new ApiError(
-          400,
-          `Only ${available} of "${orderItem.productName}" available to return`,
-        );
-      }
-    }
-
-    const uploads =
-      files && files.length > 0
-        ? await localStorageService.uploadMultiple(files.slice(0, 3), 'return-requests')
-        : [];
-
-    const created = await prisma.$transaction(async (tx) => {
-      const request = await tx.returnRequest.create({
-        data: {
-          orderId: order.id,
-          customerPhone: data.phone,
-          reason: data.reason.trim(),
-          status: ReturnRequestStatus.REQUESTED,
-          items: {
-            create: data.items.map((item) => ({
-              orderItemId: item.orderItemId,
-              quantity: item.quantity,
-            })),
-          },
-          images: {
-            create: uploads.map((upload, index) => ({
-              url: upload.url,
-              publicId: upload.publicId,
-              sortOrder: index,
-            })),
-          },
-        },
-      });
-
-      await tx.returnRequestTrackingHistory.create({
-        data: {
-          returnRequestId: request.id,
-          status: ReturnRequestStatus.REQUESTED,
-          description: getReturnStatusDescription(ReturnRequestStatus.REQUESTED),
-        },
-      });
-
-      await syncOrderFromReturnStatus(tx, order.id, ReturnRequestStatus.REQUESTED);
-
-      return tx.returnRequest.findUniqueOrThrow({
-        where: { id: request.id },
-        include: returnInclude,
-      });
-    });
-
-    const formatted = formatReturnRequest(created);
-    realtime.returnRequestCreated({
-      returnRequestId: formatted.id,
-      orderId: formatted.orderId,
-      orderNumber: formatted.order?.orderNumber,
-      status: formatted.status,
-      customerPhone: formatted.customerPhone,
-    });
-    this.queueStatusNotification(formatted);
-
-    return formatted;
   }
 
   async findAll(query: Record<string, string>) {
@@ -445,7 +283,7 @@ export class ReturnRequestService {
     }
 
     const now = new Date();
-    const updated = await prisma.$transaction(async (tx) => {
+    await runPrismaTransaction(async (tx) => {
       await tx.returnRequest.update({
         where: { id },
         data: {
@@ -487,11 +325,11 @@ export class ReturnRequestService {
       });
 
       await syncOrderFromReturnStatus(tx, existing.orderId, nextStatus);
+    });
 
-      return tx.returnRequest.findUniqueOrThrow({
-        where: { id },
-        include: returnInclude,
-      });
+    const updated = await prisma.returnRequest.findUniqueOrThrow({
+      where: { id },
+      include: returnInclude,
     });
 
     const formatted = formatReturnRequest(updated);
@@ -508,7 +346,8 @@ export class ReturnRequestService {
   }
 
   /**
-   * Escalation / admin arrange-return: create RR without customer window limits.
+   * Admin mark-return: create RR for selected items/qty (no customer window).
+   * One return per order.
    */
   async adminCreate(data: z.infer<typeof adminCreateReturnRequestSchema>) {
     const order = await prisma.order.findFirst({
@@ -520,43 +359,16 @@ export class ReturnRequestService {
       throw new ApiError(400, 'Returns are not available for international orders');
     }
 
-    const force = data.force !== false;
-    if (!force && order.status !== 'DELIVERED') {
-      throw new ApiError(400, 'Return can only be requested for delivered orders');
+    if (order.status !== 'DELIVERED' && order.status !== 'RETURNED') {
+      throw new ApiError(400, 'Return can only be marked for delivered orders');
     }
 
-    const activeReturn = await prisma.returnRequest.findFirst({
-      where: {
-        orderId: order.id,
-        status: { in: ACTIVE_STATUSES },
-      },
+    const existingReturn = await prisma.returnRequest.findFirst({
+      where: { orderId: order.id },
+      select: { id: true },
     });
-    if (activeReturn && !force) {
-      throw new ApiError(400, 'A return request is already in progress for this order');
-    }
-    // Escalation force: reject any in-progress return so a new one can be arranged
-    if (activeReturn && force) {
-      await prisma.$transaction(async (tx) => {
-        await tx.returnRequest.update({
-          where: { id: activeReturn.id },
-          data: {
-            status: ReturnRequestStatus.REJECTED,
-            rejectedAt: new Date(),
-            adminNotes: [activeReturn.adminNotes, 'Superseded by escalation arrange-return']
-              .filter(Boolean)
-              .join(' | '),
-          },
-        });
-        await tx.returnRequestTrackingHistory.create({
-          data: {
-            returnRequestId: activeReturn.id,
-            status: ReturnRequestStatus.REJECTED,
-            description: 'Escalation: superseded by new arranged return',
-          },
-        });
-      });
-      const superseded = await this.findById(activeReturn.id);
-      this.queueStatusNotification(superseded);
+    if (existingReturn) {
+      throw new ApiError(400, 'This order already has a return');
     }
 
     const orderItemById = new Map(order.items.map((item) => [item.id, item]));
@@ -566,35 +378,14 @@ export class ReturnRequestService {
     }
 
     for (const item of data.items) {
-      if (!orderItemById.has(item.orderItemId)) {
+      const orderItem = orderItemById.get(item.orderItemId);
+      if (!orderItem) {
         throw new ApiError(400, 'One or more items do not belong to this order');
       }
-    }
-
-    const existingReturnQtys = await prisma.returnRequestItem.groupBy({
-      by: ['orderItemId'],
-      where: {
-        orderItemId: { in: [...uniqueItemIds] },
-        returnRequest: {
-          orderId: order.id,
-          status: { not: ReturnRequestStatus.REJECTED },
-        },
-      },
-      _sum: { quantity: true },
-    });
-
-    const alreadyReturning = new Map(
-      existingReturnQtys.map((row) => [row.orderItemId, row._sum.quantity ?? 0]),
-    );
-
-    for (const item of data.items) {
-      const orderItem = orderItemById.get(item.orderItemId)!;
-      const used = alreadyReturning.get(item.orderItemId) ?? 0;
-      const available = orderItem.quantity - used;
-      if (item.quantity > available) {
+      if (item.quantity > orderItem.quantity) {
         throw new ApiError(
           400,
-          `Only ${available} of "${orderItem.productName}" available to return`,
+          `Only ${orderItem.quantity} of "${orderItem.productName}" available to return`,
         );
       }
     }
@@ -606,7 +397,7 @@ export class ReturnRequestService {
       : (data.initialStatus ?? ReturnRequestStatus.ACCEPTED);
     const now = new Date();
 
-    const created = await prisma.$transaction(async (tx) => {
+    const createdId = await runPrismaTransaction(async (tx) => {
       const request = await tx.returnRequest.create({
         data: {
           orderId: order.id,
@@ -638,18 +429,18 @@ export class ReturnRequestService {
         data: {
           returnRequestId: request.id,
           status: initialStatus,
-          description: force
-            ? `Escalation: return arranged as ${initialStatus}`
-            : getReturnStatusDescription(initialStatus),
+          description: getReturnStatusDescription(initialStatus),
         },
       });
 
       await syncOrderFromReturnStatus(tx, order.id, initialStatus);
 
-      return tx.returnRequest.findUniqueOrThrow({
-        where: { id: request.id },
-        include: returnInclude,
-      });
+      return request.id;
+    });
+
+    const created = await prisma.returnRequest.findUniqueOrThrow({
+      where: { id: createdId },
+      include: returnInclude,
     });
 
     const formatted = formatReturnRequest(created);

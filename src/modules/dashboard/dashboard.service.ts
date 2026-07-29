@@ -9,7 +9,7 @@ import { whatsAppService } from '@/integrations/whatsapp.service';
 import { orderEmailService } from '@/integrations/order-email.service';
 import { settingsService } from '@/modules/settings/settings.service';
 import { ApiError, buildPaginationMeta } from '@/shared/api-response';
-import { OrderStatus, Prisma, ReturnRequestStatus } from '@prisma/client';
+import { OrderStatus, Prisma } from '@prisma/client';
 import { parsePagination, parseCreatedAtFilter } from '@/utils/helpers';
 import { buildOrderDeliveryTypeFilter } from '@/utils/order-delivery-type-filter';
 import {
@@ -33,12 +33,11 @@ const REVENUE_STATUSES: OrderStatus[] = [
   'IN_TRANSIT',
   'DELIVERED',
 ];
-const OPEN_RETURN_STATUSES: ReturnRequestStatus[] = [
-  'REQUESTED',
-  'ACCEPTED',
-  'OUT_FOR_PICKUP',
-  'PICKED_UP',
-];
+/** Admin-marked returns still waiting for a store credit coupon. */
+const RETURNS_AWAITING_CREDIT: Prisma.ReturnRequestWhereInput = {
+  status: 'RETURNED',
+  refundCouponId: null,
+};
 const DASHBOARD_STATS_TTL_MS = 15 * 1000;
 
 function startOfDay(date = new Date()) {
@@ -158,9 +157,7 @@ export class DashboardService {
           },
         },
       }),
-      prisma.returnRequest.count({
-        where: { status: { in: OPEN_RETURN_STATUSES } },
-      }),
+      prisma.returnRequest.count({ where: RETURNS_AWAITING_CREDIT }),
       prisma.product.findMany({
         where: { deletedAt: null },
         orderBy: { soldCount: 'desc' },

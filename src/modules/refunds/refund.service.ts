@@ -17,6 +17,8 @@ import { realtime } from '@/realtime/emitter';
 import { whatsAppService } from '@/integrations/whatsapp.service';
 import { orderEmailService } from '@/integrations/order-email.service';
 import { logger } from '@/utils/logger';
+import { areAllOrderItemsFullyReturned } from '@/modules/orders/order-tracking.sync';
+import { runPrismaTransaction } from '@/utils/prisma-transaction';
 
 const refundListInclude = {
   payments: { orderBy: { createdAt: 'desc' as const } },
@@ -29,10 +31,11 @@ const refundListInclude = {
     },
   },
   returnRequests: {
-    orderBy: { createdAt: 'desc' as const },
+    orderBy: { createdAt: 'asc' as const },
     select: {
       id: true,
       status: true,
+      createdAt: true,
       returnedAt: true,
       refundCouponId: true,
       refundCouponCode: true,
@@ -132,23 +135,27 @@ function formatRefundOrder(order: RefundOrder) {
   const grandTotal = Number(order.grandTotal);
   const shippingCharge = Number(order.shippingCharge);
   const successfulPayment = order.payments.find((p) => p.status === PaymentStatus.SUCCESS);
-  const latestReturn = order.returnRequests[0];
+  const latestReturn = order.returnRequests[order.returnRequests.length - 1];
   const pendingReturn = findReturnForCoupon(order);
   const couponedReturn = order.returnRequests.find((r) => r.refundCouponId);
   const returnForAmount = pendingReturn ?? couponedReturn ?? undefined;
 
   const isCancellationPending =
     order.status === OrderStatus.CANCELLED && !order.refundCouponId && !order.refundedAt;
+  const isRtoPending =
+    order.status === OrderStatus.RTO && !order.refundCouponId && !order.refundedAt;
   const isReturnPending =
     Boolean(pendingReturn) &&
     pendingReturn!.status === ReturnRequestStatus.RETURNED &&
-    !order.refundCouponId &&
-    !order.refundedAt;
-  const canIssueCoupon = isCancellationPending || isReturnPending;
+    !pendingReturn!.refundCouponId;
+  const canIssueCoupon = isCancellationPending || isRtoPending || isReturnPending;
 
-  const refundType: 'CANCELLATION' | 'RETURN' | 'OTHER' = (() => {
+  const refundType: 'CANCELLATION' | 'RETURN' | 'RTO' | 'OTHER' = (() => {
     if (isCancellationPending || (order.status === OrderStatus.CANCELLED && !couponedReturn)) {
       return 'CANCELLATION';
+    }
+    if (isRtoPending || (order.status === OrderStatus.RTO && order.refundCouponId)) {
+      return 'RTO';
     }
     if (
       isReturnPending ||
@@ -187,12 +194,17 @@ function formatRefundOrder(order: RefundOrder) {
     grandTotal,
     eligibleAmount,
     shippingCharge,
+    /** Admin may deduct shipping for return / partial return / RTO; not for cancellations. */
+    allowsShippingDeduction: refundType === 'RETURN' || refundType === 'RTO',
     paymentStatus: successfulPayment?.status ?? order.payments[0]?.status ?? null,
     paymentMethod: successfulPayment?.method ?? order.payments[0]?.method ?? null,
     createdAt: order.createdAt,
     cancelledAt: order.status === OrderStatus.CANCELLED ? order.updatedAt : null,
     returnedAt:
-      latestReturn?.returnedAt ?? (order.status === OrderStatus.RETURNED ? order.updatedAt : null),
+      latestReturn?.returnedAt ??
+      (order.status === OrderStatus.RETURNED || order.status === OrderStatus.RTO
+        ? order.updatedAt
+        : null),
     returnRequestId: pendingReturn?.id ?? couponedReturn?.id ?? latestReturn?.id ?? null,
     isRefunded: !canIssueCoupon,
     refundAmount: order.refundAmount != null ? Number(order.refundAmount) : null,
@@ -206,11 +218,24 @@ function refundPendingWhere(): Prisma.OrderWhereInput {
   return {
     deletedAt: null,
     payments: { some: { status: PaymentStatus.SUCCESS } },
-    refundCouponId: null,
-    refundedAt: null,
     OR: [
-      { status: OrderStatus.CANCELLED },
       {
+        status: OrderStatus.CANCELLED,
+        refundCouponId: null,
+        refundedAt: null,
+      },
+      {
+        status: OrderStatus.RTO,
+        refundCouponId: null,
+        refundedAt: null,
+      },
+      {
+        status: OrderStatus.RETURNED,
+        refundCouponId: null,
+        refundedAt: null,
+      },
+      {
+        // Partial return: still DELIVERED (or RETURNED) with a RETURNED return and no coupon yet
         returnRequests: {
           some: {
             status: ReturnRequestStatus.RETURNED,
@@ -320,22 +345,21 @@ export class RefundService {
     const force = Boolean(data.force);
     const pendingReturn = findReturnForCoupon(order, { force });
     const isCancelled = order.status === OrderStatus.CANCELLED;
+    const isRto = order.status === OrderStatus.RTO;
     const isReturn =
       Boolean(pendingReturn) && pendingReturn!.status === ReturnRequestStatus.RETURNED;
-    const eligibleFull =
-      isCancelled &&
-      !order.refundCouponId &&
-      !order.refundedAt &&
-      order.status !== OrderStatus.REFUNDED;
+    const noOrderCouponYet = !order.refundCouponId && !order.refundedAt;
+    const eligibleCancelled = isCancelled && noOrderCouponYet;
+    const eligibleRto = isRto && noOrderCouponYet;
 
-    if (!force && !eligibleFull && !isReturn) {
+    if (!force && !eligibleCancelled && !eligibleRto && !isReturn) {
       throw new ApiError(
         400,
-        'Store credit coupons can only be issued for cancelled or returned paid orders',
+        'Store credit coupons can only be issued for cancelled, returned, or RTO paid orders',
       );
     }
 
-    if (isOrderCouponIssued(order)) {
+    if ((eligibleCancelled || eligibleRto) && isOrderCouponIssued(order)) {
       throw new ApiError(400, 'A store credit coupon has already been issued for this order');
     }
 
@@ -348,12 +372,13 @@ export class RefundService {
       isReturn || force ? pendingReturn : undefined,
     );
 
-    // Cancelled orders: always full eligible credit (no shipping deduction).
-    // Returned orders: admin may deduct shipping from the eligible amount.
-    let deduction = Math.max(0, data.deduction);
+    // Cancelled: full merchandise credit, no shipping deduction.
+    // Return / partial return / RTO: admin may deduct shipping (or leave 0).
+    const allowShippingDeduction = isReturn || eligibleRto || (force && !eligibleCancelled);
+    let deduction = allowShippingDeduction ? Math.max(0, data.deduction) : 0;
     let couponAmount = data.couponAmount;
 
-    if (eligibleFull && !force) {
+    if (eligibleCancelled && !force) {
       deduction = 0;
       couponAmount = eligibleAmount;
     } else {
@@ -376,7 +401,7 @@ export class RefundService {
     const expiresAt = new Date(now);
     expiresAt.setDate(expiresAt.getDate() + 90);
 
-    const result = await prisma.$transaction(async (tx) => {
+    const result = await runPrismaTransaction(async (tx) => {
       const couponCode = await allocateUniqueRefundCouponCode(tx);
       const coupon = await tx.coupon.create({
         data: {
@@ -394,18 +419,6 @@ export class RefundService {
         },
       });
 
-      await tx.order.update({
-        where: { id: orderId },
-        data: {
-          status: OrderStatus.REFUNDED,
-          refundDeduction: deduction,
-          refundAmount: couponAmount,
-          refundedAt: now,
-          refundCouponId: coupon.id,
-          refundCouponCode: coupon.code,
-        },
-      });
-
       if (pendingReturn && (isReturn || force)) {
         await tx.returnRequest.update({
           where: { id: pendingReturn.id },
@@ -416,15 +429,49 @@ export class RefundService {
         });
       }
 
-      await tx.trackingHistory.create({
-        data: {
-          orderId,
-          status: OrderStatus.REFUNDED,
-          description: `Store credit coupon issued: ${coupon.code}`,
-        },
-      });
+      const fullyReturned =
+        isReturn || force ? await areAllOrderItemsFullyReturned(tx, orderId) : false;
+      // Full credit when cancelled, RTO, or every item qty has been returned.
+      const markOrderFullyRefunded = eligibleCancelled || eligibleRto || fullyReturned;
 
-      return { couponCode: coupon.code, couponAmount, deduction };
+      if (markOrderFullyRefunded) {
+        const previousAmount = Number(order.refundAmount ?? 0);
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            status: OrderStatus.REFUNDED,
+            refundDeduction: deduction,
+            refundAmount: Math.round((previousAmount + couponAmount) * 100) / 100,
+            refundedAt: now,
+            refundCouponId: coupon.id,
+            refundCouponCode: coupon.code,
+          },
+        });
+
+        await tx.trackingHistory.create({
+          data: {
+            orderId,
+            status: OrderStatus.REFUNDED,
+            description: `Store credit coupon issued: ${coupon.code}`,
+          },
+        });
+      } else {
+        // Partial return: keep Delivered. Coupon is on the return request only.
+        await tx.trackingHistory.create({
+          data: {
+            orderId,
+            status: 'COUPON_ISSUED',
+            description: `Partial store credit coupon issued: ${coupon.code} (Rs. ${couponAmount})`,
+          },
+        });
+      }
+
+      return {
+        couponCode: coupon.code,
+        couponAmount,
+        deduction,
+        partial: !markOrderFullyRefunded,
+      };
     });
 
     const updated = await prisma.order.findUniqueOrThrow({
@@ -440,10 +487,12 @@ export class RefundService {
       orderId: updated.id,
       orderNumber: updated.orderNumber,
       customerPhone: updated.customerPhone,
-      refundAmount: Number(updated.refundAmount ?? result.couponAmount),
+      refundAmount: Number(result.couponAmount),
     });
 
-    orderEmailService.queueStatusEmail(updated.id, OrderStatus.REFUNDED);
+    if (!result.partial) {
+      orderEmailService.queueStatusEmail(updated.id, OrderStatus.REFUNDED);
+    }
 
     void (async () => {
       const notification = await whatsAppService.sendRefundCouponIssued({
