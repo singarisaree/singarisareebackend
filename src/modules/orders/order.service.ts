@@ -3251,14 +3251,18 @@ export class OrderService {
     };
     const notificationType = notificationTypeByStatus[status] || 'ORDER_SHIPPED';
 
-    const { sent: waSent, message: waMessage } = await whatsAppService.sendOrderStatusUpdate({
-      customerPhone: order.customerPhone,
-      customerName: order.customerName,
-      orderNumber: order.orderNumber,
-      status,
-      grandTotal: formatCurrency(Number(order.grandTotal)),
-      trackingUrl: shipping?.trackingUrl || undefined,
-    });
+    const { sent: waSent, message: waMessage, error: waError } =
+      await whatsAppService.sendOrderStatusUpdate({
+        customerPhone: order.customerPhone,
+        customerName: order.customerName,
+        orderNumber: order.orderNumber,
+        status,
+        grandTotal: formatCurrency(Number(order.grandTotal)),
+        trackingUrl: shipping?.trackingUrl || undefined,
+      });
+
+    // Skip logging when this status has no WhatsApp template (e.g. RETURNED → use return_completed).
+    if (waError === 'No WhatsApp template for this order status') return;
 
     await prisma.notification.create({
       data: {
@@ -3269,6 +3273,7 @@ export class OrderService {
         message: waMessage,
         status: waSent ? 'sent' : 'failed',
         sentAt: waSent ? new Date() : undefined,
+        error: waError,
       },
     });
   }

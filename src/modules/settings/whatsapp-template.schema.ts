@@ -18,20 +18,14 @@ export const orderStatusTemplateKinds = {
   SHIPPED: 'order_shipped',
   IN_TRANSIT: 'order_in_transit',
   DELIVERED: 'order_delivered',
-  RETURNED: 'order_returned',
   CANCELLED: 'order_cancelled',
   FAILED: 'order_failed',
   RTO: 'order_rto',
   REFUNDED: 'order_refunded',
 } as const;
 
+/** Only return-completed (and coupon separately) — intermediate return statuses are not messaged. */
 export const returnStatusTemplateKinds = {
-  REQUESTED: 'return_requested',
-  ACCEPTED: 'return_accepted',
-  REJECTED: 'return_rejected',
-  OUT_FOR_PICKUP: 'return_out_for_pickup',
-  PICKUP_CANCELLED: 'return_pickup_cancelled',
-  PICKED_UP: 'return_picked_up',
   RETURNED: 'return_completed',
 } as const;
 
@@ -45,17 +39,10 @@ export const whatsappTemplateKinds = [
   'order_shipped',
   'order_in_transit',
   'order_delivered',
-  'order_returned',
   'order_cancelled',
   'order_failed',
   'order_rto',
   'order_refunded',
-  'return_requested',
-  'return_accepted',
-  'return_rejected',
-  'return_out_for_pickup',
-  'return_pickup_cancelled',
-  'return_picked_up',
   'return_completed',
   'refund_coupon_issued',
   'customer_welcome',

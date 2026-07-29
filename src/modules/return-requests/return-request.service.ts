@@ -161,6 +161,8 @@ export class ReturnRequestService {
     order?: { orderNumber: string; customerName: string } | null;
   }): void {
     if (!request.order) return;
+    // Only return-completed WhatsApp (coupon is sent from refunds).
+    if (request.status !== ReturnRequestStatus.RETURNED) return;
     void (async () => {
       const result = await whatsAppService.sendReturnStatusUpdate({
         customerPhone: request.customerPhone,

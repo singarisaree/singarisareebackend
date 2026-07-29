@@ -167,6 +167,9 @@ export function buildOrderStatusTemplateRequest(data: {
   grandTotal?: string;
   trackingUrl?: string;
 }) {
+  const kind = orderStatusTemplateKinds[data.status as keyof typeof orderStatusTemplateKinds];
+  if (!kind) return null;
+
   const shortOrderId = formatShortOrderNumber(data.orderNumber);
   const readableStatus = data.status.replace(/_/g, ' ').toLowerCase();
   const totalStatuses: OrderStatus[] = ['PLACED', 'PAYMENT_PENDING', 'CONFIRMED'];
@@ -178,7 +181,7 @@ export function buildOrderStatusTemplateRequest(data: {
     bodyParameters.push(data.trackingUrl?.trim() || '-');
   }
   return {
-    kind: orderStatusTemplateKinds[data.status],
+    kind,
     bodyParameters,
     message: `Hello ${data.customerName}, your Singari Sarees order ${shortOrderId} is ${readableStatus}.`,
   };
@@ -191,17 +194,14 @@ export function buildReturnStatusTemplateRequest(data: {
   reason?: string;
   adminNotes?: string | null;
 }) {
+  const kind = returnStatusTemplateKinds[data.status as keyof typeof returnStatusTemplateKinds];
+  if (!kind) return null;
+
   const shortOrderId = formatShortOrderNumber(data.orderNumber);
-  const bodyParameters = [data.customerName, shortOrderId];
-  if (data.status === 'REQUESTED') {
-    bodyParameters.push(data.reason?.trim() || '-');
-  } else if (data.status === 'REJECTED') {
-    bodyParameters.push(data.adminNotes?.trim() || 'Please contact support for details');
-  }
   return {
-    kind: returnStatusTemplateKinds[data.status],
-    bodyParameters,
-    message: `Return request for order ${shortOrderId}: ${data.status.replace(/_/g, ' ').toLowerCase()}.`,
+    kind,
+    bodyParameters: [data.customerName, shortOrderId],
+    message: `Return for order ${shortOrderId} has been completed.`,
   };
 }
 
@@ -587,6 +587,13 @@ export class WhatsAppService {
     trackingUrl?: string;
   }): Promise<WhatsAppSendResult & { message: string }> {
     const request = buildOrderStatusTemplateRequest(data);
+    if (!request) {
+      return {
+        sent: false,
+        message: `No WhatsApp template for order status ${data.status}`,
+        error: 'No WhatsApp template for this order status',
+      };
+    }
     const result = await this.sendTemplate({
       to: data.customerPhone,
       kind: request.kind,
@@ -604,6 +611,13 @@ export class WhatsAppService {
     adminNotes?: string | null;
   }): Promise<WhatsAppSendResult & { message: string }> {
     const request = buildReturnStatusTemplateRequest(data);
+    if (!request) {
+      return {
+        sent: false,
+        message: `No WhatsApp template for return status ${data.status}`,
+        error: 'No WhatsApp template for this return status',
+      };
+    }
     const result = await this.sendTemplate({
       to: data.customerPhone,
       kind: request.kind,
